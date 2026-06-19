@@ -11,7 +11,6 @@ services:
     ports:
       - "8000:8080"
     restart: unless-stopped
-    networks: [default, diode_net]
     healthcheck:
       # längere Werte für den local Build
       start_period: 180s
@@ -21,14 +20,9 @@ services:
     environment:
       DB_WAIT_TIMEOUT: "180"
       DB_WAIT_DEBUG: "1"
-      NETBOX_TO_DIODE_CLIENT_ID: ${NETBOX_TO_DIODE_CLIENT_ID}
-      NETBOX_TO_DIODE_CLIENT_SECRET: ${NETBOX_TO_DIODE_CLIENT_SECRET}
-      DIODE_GRPC_TARGET: ${DIODE_GRPC_TARGET}
-      DIODE_USERNAME: ${DIODE_USERNAME}
 
   netbox-worker:
     restart: unless-stopped
-    networks: [default, diode_net]
     image: netbox-withplugins:local
     pull_policy: never
     logging:
@@ -42,7 +36,6 @@ services:
 
   netbox-housekeeping:
     restart: unless-stopped
-    networks: [default, diode_net]
     image: netbox-withplugins:local
     pull_policy: never
     environment:
@@ -83,11 +76,12 @@ services:
 
   # docker-compose.override.yml – Zusatzservice
   proxbox-api:
+    profiles: ["proxbox"]
     image: emersonfelipesp/proxbox-api:latest
     environment:
       # NetBox wird vom Backend via API beschrieben:
       NETBOX_URL: http://netbox:8080
-      NETBOX_TOKEN: ${NETBOX_API_TOKEN}
+      NETBOX_TOKEN: ${NETBOX_API_TOKEN-}
     depends_on:
       netbox:
         condition: service_started
@@ -96,5 +90,5 @@ services:
 networks:
   diode_net:
     name: diode_net
-    driver: bridge # overlay bei swarm
+    driver: bridge
     attachable: true

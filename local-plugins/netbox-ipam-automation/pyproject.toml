@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "netbox-ipam-automation"
+version = "0.1.0"
+description = "Minimal NetBox 4.6 plugin skeleton for IPAM automation"
+requires-python = ">=3.12"
+dependencies = []
+
+[project.entry-points."netbox.plugins"]
+netbox_ipam_automation = "netbox_ipam_automation:config"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["netbox_ipam_automation*"]

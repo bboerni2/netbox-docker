@@ -1,0 +1,30 @@
+services:
+  netbox:
+    env_file:
+      - env/netbox.env
+      - env/local/netbox.env
+
+  netbox-worker:
+    env_file:
+      - env/netbox.env
+      - env/local/netbox.env
+
+  netbox-housekeeping:
+    env_file:
+      - env/netbox.env
+      - env/local/netbox.env
+
+  postgres:
+    env_file:
+      - env/postgres.env
+      - env/local/postgres.env
+
+  redis:
+    env_file:
+      - env/redis.env
+      - env/local/redis.env
+
+  redis-cache:
+    env_file:
+      - env/redis-cache.env
+      - env/local/redis-cache.env

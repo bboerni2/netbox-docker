@@ -1,5 +1,8 @@
-FROM ghcr.io/netbox-community/netbox:latest
+FROM docker.io/netboxcommunity/netbox:v4.6-5.0.1
 
 COPY requirements-plugins.txt /opt/netbox/requirements-plugins.txt
+COPY local-plugins/netbox-ipam-automation /opt/netbox/local-plugins/netbox-ipam-automation
 
-RUN /usr/local/bin/uv pip install --no-cache-dir -r /opt/netbox/requirements-plugins.txt
+RUN /usr/local/bin/uv pip install --no-cache-dir \
+      -r /opt/netbox/requirements-plugins.txt \
+      /opt/netbox/local-plugins/netbox-ipam-automation

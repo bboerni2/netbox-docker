@@ -1,4 +1,9 @@
 *.sql.gz
+__pycache__/
+*.py[cod]
+.env
+!.env.example
+env/local/
 .netbox
 .python-version
 *.pem
@@ -10,6 +15,7 @@ configuration/ldap/*
 !configuration/ldap/ldap_config.py
 !configuration/logging.py
 !configuration/plugins.py
+!configuration/zz_local_plugins.py
 !/configuration/initializers/
 /configuration/initializers/*
 !/configuration/initializers/extras/

@@ -1,0 +1,18 @@
+services:
+  netbox-mcp-server:
+    profiles: ["mcp"]
+    image: ${NETBOX_MCP_IMAGE:-netboxlabs/netbox-mcp-server:1.2.1}
+    env_file:
+      - env/local/mcp.env
+    depends_on:
+      netbox:
+        condition: service_healthy
+    environment:
+      NETBOX_URL: http://netbox:8080/
+      TRANSPORT: http
+      HOST: 0.0.0.0
+      PORT: 8080
+      ENABLE_PLUGIN_DISCOVERY: "true"
+    ports:
+      - "${NETBOX_MCP_BIND_IP:-127.0.0.1}:${NETBOX_MCP_PORT:-8081}:8080"
+    restart: unless-stopped
