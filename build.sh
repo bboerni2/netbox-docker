@@ -60,7 +60,7 @@ DOCKERFILE  The name of Dockerfile to use.
             ${_GREEN}Default:${_CLEAR} Dockerfile
 
 DOCKER_FROM The base image to use.
-            ${_GREEN}Default:${_CLEAR} 'ubuntu:24.04'
+            ${_GREEN}Default:${_CLEAR} 'ubuntu:26.04'
 
 BUILDX_PLATFORM
             Specifies the platform(s) to build the image for.
@@ -217,7 +217,7 @@ fi
 # Determining the value for DOCKER_FROM
 ###
 if [ -z "$DOCKER_FROM" ]; then
-  DOCKER_FROM="docker.io/ubuntu:24.04"
+  DOCKER_FROM="docker.io/ubuntu:26.04"
 fi
 
 ###
@@ -305,7 +305,7 @@ gh_env "FINAL_DOCKER_TAG=${IMAGE_NAME_TAGS[0]}"
 ###
 # Checking if the build is necessary,
 # meaning build only if one of those values changed:
-# - a new tag is beeing created
+# - a new tag is being created
 # - base image digest
 # - netbox git ref (Label: netbox.git-ref)
 # - netbox-docker git ref (Label: org.opencontainers.image.revision)
@@ -314,7 +314,7 @@ gh_env "FINAL_DOCKER_TAG=${IMAGE_NAME_TAGS[0]}"
 SHOULD_BUILD="false"
 BUILD_REASON=""
 if [ -z "${GH_ACTION}" ]; then
-  # Asuming non Github builds should always proceed
+  # Assuming non Github builds should always proceed
   SHOULD_BUILD="true"
   BUILD_REASON="${BUILD_REASON} interactive"
 elif [ "false" == "$(check_if_tags_exists "${IMAGE_NAMES[0]}" "$TARGET_DOCKER_TAG")" ]; then
@@ -404,6 +404,8 @@ fi
 # shellcheck disable=SC2031
 if [ -n "${HTTP_PROXY}" ]; then
   DOCKER_BUILD_ARGS+=(--build-arg "http_proxy=${HTTP_PROXY}")
+fi
+if [ -n "${HTTPS_PROXY}" ]; then
   DOCKER_BUILD_ARGS+=(--build-arg "https_proxy=${HTTPS_PROXY}")
 fi
 if [ -n "${NO_PROXY}" ]; then

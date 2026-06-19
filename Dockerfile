@@ -1,7 +1,7 @@
 ARG FROM
 FROM ${FROM} AS builder
 
-COPY --from=ghcr.io/astral-sh/uv:0.10 /uv /usr/local/bin/
+COPY --from=ghcr.io/astral-sh/uv:0.11 /uv /usr/local/bin/
 RUN export DEBIAN_FRONTEND=noninteractive \
     && apt-get update -qq \
     && apt-get upgrade \
@@ -15,9 +15,9 @@ RUN export DEBIAN_FRONTEND=noninteractive \
       libsasl2-dev \
       libssl-dev \
       libxml2-dev \
-      libxmlsec1 \
+      libxmlsec1-1 \
       libxmlsec1-dev \
-      libxmlsec1-openssl \
+      libxmlsec1-openssl1 \
       libxslt-dev \
       pkg-config \
       python3-dev \
@@ -57,20 +57,20 @@ RUN export DEBIAN_FRONTEND=noninteractive \
       curl \
       libldap-common \
       libpq5 \
-      libxmlsec1-openssl \
+      libxmlsec1-openssl1 \
       openssh-client \
       openssl \
       python3 \
       tini \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy the modified 'requirements*.txt' files, to have the files actually used during installation
-COPY --from=builder /requirements.txt /requirements-container.txt /opt/netbox/
 COPY --from=builder /usr/local/bin/uv /usr/local/bin/
 COPY --from=builder /opt/netbox/venv /opt/netbox/venv
 
 ARG NETBOX_PATH
 COPY ${NETBOX_PATH} /opt/netbox
+# Copy the modified 'requirements*.txt' files, to have the files actually used during installation
+COPY --from=builder /requirements.txt /requirements-container.txt /opt/netbox/
 
 COPY docker/configuration.docker.py /opt/netbox/netbox/netbox/configuration.py
 COPY docker/ldap_config.docker.py /opt/netbox/netbox/netbox/ldap_config.py
@@ -89,8 +89,8 @@ RUN useradd --home-dir /opt/netbox/ --no-create-home --no-user-group --system --
     && mkdir -p static media local \
     && chown -R netbox:root media reports scripts \
     && chmod -R g+w media reports scripts \
-    && cd /opt/netbox/ && SECRET_KEY="dummyKeyWithMinimumLength-------------------------" /opt/netbox/venv/bin/python -m mkdocs build \
-        --config-file /opt/netbox/mkdocs.yml --site-dir /opt/netbox/netbox/project-static/docs/ \
+    && cd /opt/netbox/ && SECRET_KEY="dummyKeyWithMinimumLength-------------------------" /opt/netbox/venv/bin/zensical build \
+        --config-file /opt/netbox/mkdocs.yml \
     && DEBUG="true" SECRET_KEY="dummyKeyWithMinimumLength-------------------------" /opt/netbox/venv/bin/python /opt/netbox/netbox/manage.py collectstatic --no-input \
     && echo "build: Docker-$(cat /opt/netbox/VERSION)" > /opt/netbox/netbox/local/release.yaml
 
