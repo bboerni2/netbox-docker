@@ -50,6 +50,10 @@ class GlobalSettingsForm(IntervalFieldsMixin, NetBoxModelForm):
             "max_concurrent_scans",
             "deprecated_last_seen_days",
             "deprecated_grace_period_days",
+            "default_tcp_ports",
+            "tcp_timeout_seconds",
+            "tcp_worker_count",
+            "reverse_dns_enabled",
         ),
     )
 
@@ -64,6 +68,10 @@ class GlobalSettingsForm(IntervalFieldsMixin, NetBoxModelForm):
             "max_concurrent_scans",
             "deprecated_last_seen_days",
             "deprecated_grace_period_days",
+            "default_tcp_ports",
+            "tcp_timeout_seconds",
+            "tcp_worker_count",
+            "reverse_dns_enabled",
         )
 
     def __init__(self, *args, **kwargs):
@@ -79,6 +87,13 @@ class GlobalSettingsForm(IntervalFieldsMixin, NetBoxModelForm):
             "Days a deprecated IP remains reserved before it can be marked free."
         )
         self.fields["default_cron_expressions"].help_text = CRON_HELP_TEXT
+        self.fields["default_tcp_ports"].label = "Default TCP ports"
+        self.fields["default_tcp_ports"].help_text = "Comma-separated TCP ports, for example 22,80,443,3389."
+        self.fields["tcp_timeout_seconds"].label = "TCP timeout"
+        self.fields["tcp_timeout_seconds"].help_text = "Seconds to wait for each TCP connection attempt."
+        self.fields["tcp_worker_count"].label = "TCP workers"
+        self.fields["tcp_worker_count"].help_text = "Maximum concurrent TCP probes per scan."
+        self.fields["reverse_dns_enabled"].label = "Reverse DNS enabled"
 
     def clean(self):
         super().clean()
@@ -107,6 +122,7 @@ class RangePolicyForm(IntervalFieldsMixin, NetBoxModelForm):
             "target_range",
             "scan_start",
             "scan_end",
+            "tcp_ports",
             name="Target",
         ),
         FieldSet(
@@ -129,6 +145,7 @@ class RangePolicyForm(IntervalFieldsMixin, NetBoxModelForm):
             "target_range",
             "scan_start",
             "scan_end",
+            "tcp_ports",
             "enabled",
             "schedule_mode",
             "interval_minutes",
@@ -152,6 +169,10 @@ class RangePolicyForm(IntervalFieldsMixin, NetBoxModelForm):
         )
         self.fields["scan_end"].help_text = (
             "Optional IPv4 address. Leave blank to auto-select the last address."
+        )
+        self.fields["tcp_ports"].label = "TCP ports"
+        self.fields["tcp_ports"].help_text = (
+            "Optional comma-separated TCP ports, for example 22,80,443,3389. Leave blank to use the global default."
         )
         self.fields["cron_expressions"].help_text = CRON_HELP_TEXT
 

@@ -6,14 +6,25 @@ from django.test import TestCase
 from ipam.models import IPAddress, IPRange
 
 from netbox_ipam_automation.forms import GlobalSettingsForm, RangePolicyForm
-from netbox_ipam_automation.jobs import create_due_scheduled_scan_runs
+from netbox_ipam_automation.jobs import create_due_scheduled_scan_runs, execute_scan_run
 from netbox_ipam_automation.models import GlobalSettings, RangePolicy, ScanRun
 from netbox_ipam_automation.services import (
     apply_scan_observations,
     due_time_for_cron,
+    get_policy_tcp_ports,
     initialize_range_policy,
     parse_cron_expressions,
+    parse_tcp_ports,
+    scan_range,
 )
+
+
+class DummySocket:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return None
 
 
 class RangePolicyTest(TestCase):
@@ -53,6 +64,20 @@ class RangePolicyTest(TestCase):
         self.assertEqual(dict(form.fields["schedule_mode"].choices)["inherit"], "Global default")
         self.assertIn("auto-select the first address", form.fields["scan_start"].help_text)
         self.assertIn("one five-field cron expression per line", form.fields["cron_expressions"].help_text)
+        self.assertIn("22,80,443,3389", form.fields["tcp_ports"].help_text)
+
+    def test_tcp_port_override_is_validated_and_deduplicated(self):
+        policy = RangePolicy(name="TCP override", target_range=self.ip_range, tcp_ports="443,22,443")
+        policy.full_clean()
+
+        self.assertEqual(policy.tcp_ports, "443,22")
+        self.assertEqual(parse_tcp_ports("22,80,443,3389\n22"), [22, 80, 443, 3389])
+        self.assertEqual(get_policy_tcp_ports(policy, GlobalSettings(default_tcp_ports="80")), [443, 22])
+
+        with self.assertRaises(ValueError):
+            parse_tcp_ports("0")
+        with self.assertRaises(ValueError):
+            parse_tcp_ports("ssh")
 
     def test_initialization_creates_only_missing_special_addresses(self):
         policy = RangePolicy(name="Initialized range", target_range=self.ip_range)
@@ -117,6 +142,10 @@ class SchedulingTest(TestCase):
                 "max_concurrent_scans": 1,
                 "deprecated_last_seen_days": 2,
                 "deprecated_grace_period_days": 14,
+                "default_tcp_ports": "22,80,443,3389",
+                "tcp_timeout_seconds": 1,
+                "tcp_worker_count": 64,
+                "reverse_dns_enabled": "on",
             },
             instance=settings,
         )
@@ -216,3 +245,126 @@ class ScanStatusPolicyTest(TestCase):
         self.assertEqual(dhcp.status, "dhcp")
         self.assertEqual(custom.status, "custom")
         self.assertEqual(summary["skipped_protected"], 4)
+
+    def test_responsive_hostname_updates_only_managed_status(self):
+        managed = self._create_ip("192.0.2.1/29", "free")
+        protected = self._create_ip("192.0.2.2/29", "reserved")
+
+        summary = apply_scan_observations(
+            self.policy,
+            responsive_hosts={"192.0.2.1", "192.0.2.2"},
+            global_settings=self.settings,
+            hostnames={"192.0.2.1": "managed.example", "192.0.2.2": "protected.example"},
+        )
+
+        managed.refresh_from_db()
+        protected.refresh_from_db()
+        self.assertEqual(managed.status, "active")
+        self.assertEqual(managed.dns_name, "managed.example")
+        self.assertEqual(protected.status, "reserved")
+        self.assertEqual(protected.dns_name, "")
+        self.assertEqual(summary["skipped_protected"], 1)
+
+
+class ScannerAdapterTest(TestCase):
+    def setUp(self):
+        self.ip_range = IPRange(
+            start_address="203.0.113.0/30",
+            end_address="203.0.113.3/30",
+            status="active",
+        )
+        self.ip_range.full_clean()
+        self.ip_range.save()
+        self.policy = RangePolicy(name="Scanner policy", target_range=self.ip_range, tcp_ports="22,443")
+        self.policy.full_clean()
+        self.policy.save()
+        self.settings = GlobalSettings(
+            default_tcp_ports="80",
+            tcp_timeout_seconds=1,
+            tcp_worker_count=2,
+            reverse_dns_enabled=False,
+            deprecated_last_seen_days=2,
+            deprecated_grace_period_days=14,
+        )
+        self.settings.full_clean()
+
+    def test_scan_range_reports_responsive_hosts_from_tcp_probe(self):
+        def connect(address, timeout):
+            host, port = address
+            if host == "203.0.113.1" and port == 443:
+                return DummySocket()
+            raise TimeoutError("closed")
+
+        with patch("netbox_ipam_automation.services.socket.create_connection", side_effect=connect):
+            result = scan_range(self.policy, global_settings=self.settings)
+
+        self.assertEqual(result["ports"], [22, 443])
+        self.assertEqual(result["scanned_hosts"], 4)
+        self.assertEqual(result["responsive_hosts"], ["203.0.113.1"])
+        self.assertEqual(result["open_ports"], {"203.0.113.1": [443]})
+        self.assertLessEqual(len(result["errors"]), 50)
+
+    def test_reverse_dns_is_best_effort(self):
+        self.settings.reverse_dns_enabled = True
+
+        def connect(address, timeout):
+            host, port = address
+            if host == "203.0.113.2" and port == 22:
+                return DummySocket()
+            raise ConnectionRefusedError("closed")
+
+        def gethostbyaddr(host):
+            if host == "203.0.113.2":
+                return ("host.example", [], [])
+            raise OSError("dns failed")
+
+        with (
+            patch("netbox_ipam_automation.services.socket.create_connection", side_effect=connect),
+            patch("netbox_ipam_automation.services.socket.gethostbyaddr", side_effect=gethostbyaddr),
+        ):
+            result = scan_range(self.policy, global_settings=self.settings)
+
+        self.assertEqual(result["responsive_hosts"], ["203.0.113.2"])
+        self.assertEqual(result["hostnames"], {"203.0.113.2": "host.example"})
+
+    @patch("netbox_ipam_automation.jobs.scan_range")
+    def test_execute_scan_run_applies_observations_and_writes_summary(self, scan_range_mock):
+        GlobalSettings.objects.create(
+            default_tcp_ports="22,80,443,3389",
+            tcp_timeout_seconds=1,
+            tcp_worker_count=64,
+            reverse_dns_enabled=True,
+            deprecated_last_seen_days=2,
+            deprecated_grace_period_days=14,
+        )
+        managed = IPAddress.objects.create(address="203.0.113.1/30", status="free")
+        protected = IPAddress.objects.create(address="203.0.113.2/30", status="reserved")
+        scan_run = ScanRun.objects.create(policy=self.policy, target_cidr=self.policy.target_cidr)
+        scan_range_mock.return_value = {
+            "scanned_hosts": 4,
+            "responsive_hosts": ["203.0.113.1", "203.0.113.2"],
+            "open_ports": {"203.0.113.1": [443], "203.0.113.2": [22]},
+            "hostnames": {"203.0.113.1": "managed.example", "203.0.113.2": "protected.example"},
+            "errors": [{"host": "203.0.113.3", "port": 22, "error": "TimeoutError"}],
+            "ports": [22, 80, 443, 3389],
+            "timeout_seconds": 1,
+            "worker_count": 64,
+        }
+
+        execute_scan_run(scan_run.pk, job_id="test-job")
+        scan_run.refresh_from_db()
+        managed.refresh_from_db()
+        protected.refresh_from_db()
+
+        self.assertEqual(scan_run.status, ScanRun.StatusChoices.COMPLETED)
+        self.assertEqual(scan_run.observed_hosts, 2)
+        self.assertEqual(scan_run.responsive_hosts, 2)
+        self.assertEqual(scan_run.error_count, 0)
+        self.assertEqual(scan_run.summary["job_id"], "test-job")
+        self.assertEqual(scan_run.summary["updated"], 1)
+        self.assertEqual(scan_run.summary["skipped_protected"], 1)
+        self.assertEqual(scan_run.summary["responsive_hosts"], ["203.0.113.1", "203.0.113.2"])
+        self.assertEqual(managed.status, "active")
+        self.assertEqual(managed.dns_name, "managed.example")
+        self.assertEqual(protected.status, "reserved")
+        self.assertEqual(protected.dns_name, "")

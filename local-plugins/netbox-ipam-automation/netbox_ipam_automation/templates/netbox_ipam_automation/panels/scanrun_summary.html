@@ -1,0 +1,91 @@
+{% extends "ui/panels/_base.html" %}
+{% load helpers %}
+
+{% block panel_content %}
+  <div class="card-body">
+    {% with summary=object.summary %}
+      {% if summary %}
+        <dl class="row mb-0">
+          <dt class="col-5">Adapter</dt>
+          <dd class="col-7">{{ summary.adapter|default:"-" }}</dd>
+
+          <dt class="col-5">Ports</dt>
+          <dd class="col-7">
+            {% if summary.ports %}{{ summary.ports|join:", " }}{% else %}-{% endif %}
+          </dd>
+
+          <dt class="col-5">Scanned hosts</dt>
+          <dd class="col-7">{{ summary.scanned_hosts|default:"0" }}</dd>
+
+          <dt class="col-5">Responsive hosts</dt>
+          <dd class="col-7">{{ object.responsive_hosts }}</dd>
+
+          <dt class="col-5">Updated</dt>
+          <dd class="col-7">{{ summary.updated|default:"0" }}</dd>
+
+          <dt class="col-5">Skipped protected</dt>
+          <dd class="col-7">{{ summary.skipped_protected|default:"0" }}</dd>
+
+          <dt class="col-5">Errors</dt>
+          <dd class="col-7">{{ summary.errors|length }}</dd>
+        </dl>
+
+        {% if summary.responsive_hosts %}
+          <h3 class="h6 mt-3">Responsive hosts</h3>
+          <ul class="list-unstyled mb-0">
+            {% for host in summary.responsive_hosts %}
+              <li><code>{{ host }}</code>{% if summary.open_ports|get_item:host %} <span class="text-muted">({{ summary.open_ports|get_item:host|join:", " }})</span>{% endif %}</li>
+            {% endfor %}
+          </ul>
+        {% endif %}
+
+        {% if summary.hostnames %}
+          <h3 class="h6 mt-3">Hostnames</h3>
+          <dl class="row mb-0">
+            {% for host, hostname in summary.hostnames.items %}
+              <dt class="col-5"><code>{{ host }}</code></dt>
+              <dd class="col-7">{{ hostname }}</dd>
+            {% endfor %}
+          </dl>
+        {% endif %}
+
+        {% if summary.errors %}
+          <h3 class="h6 mt-3">Errors</h3>
+          <div class="table-responsive">
+            <table class="table table-sm mb-0">
+              <thead>
+                <tr>
+                  <th>Host</th>
+                  <th>Port</th>
+                  <th>Error</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for error in summary.errors|slice:":10" %}
+                  <tr>
+                    <td><code>{{ error.host|default:"-" }}</code></td>
+                    <td>{{ error.port|default:"-" }}</td>
+                    <td>
+                      {% if error.error %}
+                        {{ error.error }}
+                      {% elif error.message %}
+                        {{ error.message }}
+                      {% else %}
+                        -
+                      {% endif %}
+                    </td>
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+          {% if summary.errors|length > 10 %}
+            <p class="text-muted mb-0 mt-2">Showing 10 of {{ summary.errors|length }} errors.</p>
+          {% endif %}
+        {% endif %}
+      {% else %}
+        <span class="text-muted">None</span>
+      {% endif %}
+    {% endwith %}
+  </div>
+{% endblock panel_content %}

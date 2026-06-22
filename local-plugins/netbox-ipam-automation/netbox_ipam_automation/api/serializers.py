@@ -18,6 +18,10 @@ class GlobalSettingsSerializer(NetBoxModelSerializer):
             "max_concurrent_scans",
             "deprecated_last_seen_days",
             "deprecated_grace_period_days",
+            "default_tcp_ports",
+            "tcp_timeout_seconds",
+            "tcp_worker_count",
+            "reverse_dns_enabled",
             "created",
             "last_updated",
         )
@@ -37,6 +41,7 @@ class RangePolicySerializer(NetBoxModelSerializer):
             "target_cidr",
             "scan_start",
             "scan_end",
+            "tcp_ports",
             "enabled",
             "schedule_mode",
             "interval_minutes",

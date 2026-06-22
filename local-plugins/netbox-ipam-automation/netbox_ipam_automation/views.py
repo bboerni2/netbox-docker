@@ -1,5 +1,5 @@
 from netbox.ui import attrs, layout
-from netbox.ui.panels import CommentsPanel, JSONPanel, ObjectAttributesPanel
+from netbox.ui.panels import CommentsPanel, ObjectAttributesPanel, TemplatePanel
 from netbox.object_actions import CloneObject, DeleteObject, EditObject, ObjectAction
 from django.contrib.auth.mixins import PermissionRequiredMixin
 from django.contrib import messages
@@ -26,6 +26,10 @@ class GlobalSettingsPanel(ObjectAttributesPanel):
     max_concurrent_scans = attrs.NumericAttr("max_concurrent_scans", label="Max concurrent scans")
     deprecated_last_seen_days = attrs.NumericAttr("deprecated_last_seen_days", label="Deprecated last seen")
     deprecated_grace_period_days = attrs.NumericAttr("deprecated_grace_period_days", label="Deprecated grace period")
+    default_tcp_ports = attrs.TextAttr("default_tcp_ports", label="Default TCP ports")
+    tcp_timeout_seconds = attrs.NumericAttr("tcp_timeout_seconds", label="TCP timeout")
+    tcp_worker_count = attrs.NumericAttr("tcp_worker_count", label="TCP workers")
+    reverse_dns_enabled = attrs.BooleanAttr("reverse_dns_enabled", label="Reverse DNS enabled")
 
 
 class RangePolicyPanel(ObjectAttributesPanel):
@@ -35,6 +39,7 @@ class RangePolicyPanel(ObjectAttributesPanel):
     target_cidr = attrs.TextAttr("target_cidr", label="Target CIDR")
     scan_start = attrs.TextAttr("scan_start", label="Scan start")
     scan_end = attrs.TextAttr("scan_end", label="Scan end")
+    tcp_ports = attrs.TextAttr("tcp_ports", label="TCP ports")
     enabled = attrs.BooleanAttr("enabled", label="Schedule enabled")
     schedule_mode = attrs.ChoiceAttr("schedule_mode", label="Schedule mode")
     interval_minutes = attrs.NumericAttr("interval_minutes", label="Interval")
@@ -165,7 +170,7 @@ class ScanRunView(ObjectView):
     template_name = "generic/object.html"
     layout = layout.SimpleLayout(
         left_panels=[ScanRunPanel(), CommentsPanel()],
-        right_panels=[JSONPanel("summary", title="Summary")],
+        right_panels=[TemplatePanel("netbox_ipam_automation/panels/scanrun_summary.html", title="Summary")],
     )
 
 

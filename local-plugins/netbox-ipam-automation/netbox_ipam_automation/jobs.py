@@ -7,8 +7,10 @@ from netbox.jobs import JobRunner, system_job
 
 from .models import GlobalSettings, RangePolicy, ScanRun, ip_range_to_target
 from .services import (
+    apply_scan_observations,
     build_scan_request,
     classify_scan_result,
+    scan_range,
     select_due_candidates,
 )
 
@@ -181,62 +183,61 @@ def classify_scan_run(scan_run) -> str:
     )
 
 
-class ExecuteScanRunJob(JobRunner):
-    class Meta:
-        name = "Execute IPAM scan run"
+def execute_scan_run(scan_run_id, *, job_id="manual", logger=None):
+    scan_run = ScanRun.objects.select_related("policy__target_range").get(pk=scan_run_id)
+    if scan_run.status in TERMINAL_SCANRUN_STATUSES:
+        if logger:
+            logger.info("Skipping terminal scan run %s", scan_run.pk)
+        return scan_run
 
-    @transaction.atomic
-    def run(self, *args, **kwargs):
-        scan_run = self.job.object
-        if scan_run is None:
-            raise JobFailed("Scan execution job is missing its ScanRun instance.")
+    if not scan_run.target_cidr:
+        scan_run.target_cidr = get_policy_target(scan_run.policy)
+    if not scan_run.target_cidr:
+        scan_run.status = ScanRun.StatusChoices.FAILED
+        scan_run.classification = ScanRun.ClassificationChoices.FAILED
+        scan_run.finished_at = timezone.now()
+        scan_run.message = "No policy target is configured for this scan run."
+        scan_run.save(update_fields=("target_cidr", "status", "classification", "finished_at", "message", "last_updated"))
+        raise JobFailed(scan_run.message)
 
-        scan_run = ScanRun.objects.select_for_update().select_related("policy").get(pk=scan_run.pk)
-        if scan_run.status in TERMINAL_SCANRUN_STATUSES:
-            self.logger.info("Skipping terminal scan run %s", scan_run.pk)
-            return
+    if not scan_run.started_at:
+        scan_run.started_at = timezone.now()
+    scan_run.status = ScanRun.StatusChoices.RUNNING
+    scan_run.message = "Executing TCP scan."
+    scan_run.save(update_fields=("started_at", "status", "message", "last_updated"))
 
-        if not scan_run.target_cidr:
-            scan_run.target_cidr = get_policy_target(scan_run.policy)
-        if not scan_run.target_cidr:
-            scan_run.status = ScanRun.StatusChoices.FAILED
-            scan_run.classification = ScanRun.ClassificationChoices.FAILED
-            scan_run.finished_at = timezone.now()
-            scan_run.message = "No policy target is configured for this scan run."
-            scan_run.save(
-                update_fields=("target_cidr", "status", "classification", "finished_at", "message", "last_updated")
-            )
-            raise JobFailed(scan_run.message)
+    global_settings = get_global_settings()
+    request_payload = schedule_scan_run(scan_run)
+    if logger:
+        logger.info("Using TCP adapter for scan run %s", scan_run.pk)
 
-        if not scan_run.started_at:
-            scan_run.started_at = timezone.now()
-        scan_run.status = ScanRun.StatusChoices.RUNNING
-        scan_run.message = "Executing scan adapter."
-        scan_run.save(update_fields=("started_at", "status", "message", "last_updated"))
-
-        request_payload = schedule_scan_run(scan_run)
-        self.logger.info("Using %s adapter for scan run %s", request_payload["mode"], scan_run.pk)
-
+    try:
+        scan_result = scan_range(scan_run.policy, global_settings=global_settings)
+        observation_summary = apply_scan_observations(
+            scan_run.policy,
+            scan_result["responsive_hosts"],
+            global_settings=global_settings,
+            hostnames=scan_result["hostnames"],
+        )
+    except Exception as exc:
         scan_run.summary = {
             **(scan_run.summary or {}),
-            "adapter": request_payload["mode"],
-            "accepted": request_payload["accepted"],
-            "job_id": str(self.job.job_id),
+            "adapter": "tcp",
+            "accepted": False,
+            "job_id": str(job_id),
             "scheduled_for": request_payload["scheduled_for"],
             "target_cidr": request_payload["target_cidr"],
+            "errors": [{"error": type(exc).__name__, "message": str(exc)}],
         }
-        scan_run.classification = classify_scan_run(scan_run)
+        scan_run.error_count = 1
+        scan_run.classification = ScanRun.ClassificationChoices.FAILED
+        scan_run.status = ScanRun.StatusChoices.FAILED
         scan_run.finished_at = timezone.now()
-        if scan_run.classification == ScanRun.ClassificationChoices.FAILED:
-            scan_run.status = ScanRun.StatusChoices.FAILED
-        elif scan_run.classification == ScanRun.ClassificationChoices.PARTIAL:
-            scan_run.status = ScanRun.StatusChoices.PARTIAL
-        else:
-            scan_run.status = ScanRun.StatusChoices.COMPLETED
-        scan_run.message = request_payload["message"]
+        scan_run.message = f"TCP scan failed: {exc}"
         scan_run.save(
             update_fields=(
                 "summary",
+                "error_count",
                 "classification",
                 "finished_at",
                 "status",
@@ -244,6 +245,67 @@ class ExecuteScanRunJob(JobRunner):
                 "last_updated",
             )
         )
+        raise JobFailed(scan_run.message) from exc
+
+    scan_run.summary = {
+        **(scan_run.summary or {}),
+        "adapter": "tcp",
+        "accepted": True,
+        "job_id": str(job_id),
+        "scheduled_for": request_payload["scheduled_for"],
+        "target_cidr": request_payload["target_cidr"],
+        "observed_hosts": observation_summary["observed_hosts"],
+        "scanned_hosts": scan_result["scanned_hosts"],
+        "responsive_hosts": scan_result["responsive_hosts"],
+        "updated": observation_summary["updated"],
+        "skipped_protected": observation_summary["skipped_protected"],
+        "errors": scan_result["errors"],
+        "hostnames": scan_result["hostnames"],
+        "open_ports": scan_result["open_ports"],
+        "ports": scan_result["ports"],
+        "timeout_seconds": scan_result["timeout_seconds"],
+        "worker_count": scan_result["worker_count"],
+    }
+    scan_run.observed_hosts = observation_summary["observed_hosts"]
+    scan_run.responsive_hosts = observation_summary["responsive_hosts"]
+    scan_run.error_count = 0
+    scan_run.classification = classify_scan_run(scan_run)
+    scan_run.finished_at = timezone.now()
+    if scan_run.classification == ScanRun.ClassificationChoices.FAILED:
+        scan_run.status = ScanRun.StatusChoices.FAILED
+    elif scan_run.classification == ScanRun.ClassificationChoices.PARTIAL:
+        scan_run.status = ScanRun.StatusChoices.PARTIAL
+    else:
+        scan_run.status = ScanRun.StatusChoices.COMPLETED
+    scan_run.message = (
+        f"TCP scan completed: {scan_run.responsive_hosts}/{scan_result['scanned_hosts']} responsive, "
+        f"{observation_summary['updated']} updated, {observation_summary['skipped_protected']} protected."
+    )
+    scan_run.save(
+        update_fields=(
+            "summary",
+            "observed_hosts",
+            "responsive_hosts",
+            "error_count",
+            "classification",
+            "finished_at",
+            "status",
+            "message",
+            "last_updated",
+        )
+    )
+    return scan_run
+
+
+class ExecuteScanRunJob(JobRunner):
+    class Meta:
+        name = "Execute IPAM scan run"
+
+    def run(self, *args, **kwargs):
+        scan_run = self.job.object
+        if scan_run is None:
+            raise JobFailed("Scan execution job is missing its ScanRun instance.")
+        execute_scan_run(scan_run.pk, job_id=self.job.job_id, logger=self.logger)
 
 
 @system_job(interval=1)

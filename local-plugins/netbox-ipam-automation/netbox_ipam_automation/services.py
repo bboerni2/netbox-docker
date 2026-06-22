@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from ipaddress import IPv4Address, IPv4Network, ip_address, ip_network, summarize_address_range
+import socket
 
 from croniter import croniter
 from django.db import transaction
 from django.utils import timezone as django_timezone
 
 MANAGED_IP_STATUSES = {"active", "free", "deprecated"}
+SCAN_ERROR_LIMIT = 50
 
 
 def normalize_cidr(value: str) -> str:
@@ -51,6 +54,34 @@ def parse_cron_expressions(value: str) -> list[str]:
 
 def normalize_cron_expressions(value: str) -> str:
     return "\n".join(parse_cron_expressions(value))
+
+
+def parse_tcp_ports(value: str, *, allow_blank: bool = False) -> list[int]:
+    ports: list[int] = []
+    seen: set[int] = set()
+    normalized = str(value or "").replace("\n", ",").replace(" ", ",")
+
+    for raw_port in normalized.split(","):
+        raw_port = raw_port.strip()
+        if not raw_port:
+            continue
+        try:
+            port = int(raw_port)
+        except ValueError as exc:
+            raise ValueError(f"Invalid TCP port '{raw_port}'.") from exc
+        if port < 1 or port > 65535:
+            raise ValueError(f"TCP port {port} must be between 1 and 65535.")
+        if port not in seen:
+            seen.add(port)
+            ports.append(port)
+
+    if not ports and not allow_blank:
+        raise ValueError("At least one TCP port is required.")
+    return ports
+
+
+def normalize_tcp_ports(value: str, *, allow_blank: bool = False) -> str:
+    return ",".join(str(port) for port in parse_tcp_ports(value, allow_blank=allow_blank))
 
 
 def next_scheduled_for(
@@ -185,10 +216,11 @@ def parse_deprecated_since(description: str) -> datetime | None:
         return None
 
 
-def apply_scan_observations(policy, responsive_hosts, *, global_settings, now=None) -> dict[str, int]:
+def apply_scan_observations(policy, responsive_hosts, *, global_settings, hostnames=None, now=None) -> dict[str, int]:
     from ipam.models import IPAddress
 
     now = now or django_timezone.now()
+    hostnames = hostnames or {}
     network = ip_range_to_network(policy.target_range.start_address, policy.target_range.end_address)
     responsive = {ip_address(str(host).split("/", 1)[0]) for host in responsive_hosts}
     deprecated_cutoff = now - timedelta(days=global_settings.deprecated_last_seen_days)
@@ -219,6 +251,10 @@ def apply_scan_observations(policy, responsive_hosts, *, global_settings, now=No
             if ip_obj.status != "active":
                 ip_obj.status = "active"
                 update_fields.append("status")
+            hostname = hostnames.get(str(host))
+            if hostname and ip_obj.dns_name != hostname:
+                ip_obj.dns_name = hostname
+                update_fields.append("dns_name")
             if ip_obj.description.startswith("Deprecated since "):
                 ip_obj.description = ""
                 update_fields.append("description")
@@ -245,6 +281,79 @@ def apply_scan_observations(policy, responsive_hosts, *, global_settings, now=No
             summary["updated"] += 1
 
     return summary
+
+
+def iter_policy_scan_hosts(policy):
+    start = ip_address(str(policy.scan_start).split("/", 1)[0])
+    end = ip_address(str(policy.scan_end).split("/", 1)[0])
+    current = int(start)
+    last = int(end)
+    while current <= last:
+        yield str(IPv4Address(current))
+        current += 1
+
+
+def get_policy_tcp_ports(policy, global_settings) -> list[int]:
+    return parse_tcp_ports(policy.tcp_ports or global_settings.default_tcp_ports)
+
+
+def probe_tcp_host(host: str, ports: list[int], timeout: int) -> dict[str, object]:
+    errors = []
+    for port in ports:
+        try:
+            with socket.create_connection((host, port), timeout=timeout):
+                return {"host": host, "responsive": True, "open_ports": [port], "errors": errors}
+        except OSError as exc:
+            errors.append({"host": host, "port": port, "error": type(exc).__name__})
+    return {"host": host, "responsive": False, "open_ports": [], "errors": errors}
+
+
+def reverse_dns(host: str) -> str | None:
+    try:
+        return socket.gethostbyaddr(host)[0]
+    except (OSError, socket.herror, socket.gaierror):
+        return None
+
+
+def scan_range(policy, *, global_settings) -> dict[str, object]:
+    ports = get_policy_tcp_ports(policy, global_settings)
+    hosts = list(iter_policy_scan_hosts(policy))
+    timeout = int(global_settings.tcp_timeout_seconds)
+    worker_count = min(int(global_settings.tcp_worker_count), max(len(hosts), 1))
+    responsive_hosts: list[str] = []
+    open_ports: dict[str, list[int]] = {}
+    errors: list[dict[str, object]] = []
+
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        futures = [executor.submit(probe_tcp_host, host, ports, timeout) for host in hosts]
+        for future in as_completed(futures):
+            result = future.result()
+            host = str(result["host"])
+            if result["responsive"]:
+                responsive_hosts.append(host)
+                open_ports[host] = result["open_ports"]
+            if len(errors) < SCAN_ERROR_LIMIT:
+                remaining = SCAN_ERROR_LIMIT - len(errors)
+                errors.extend(result["errors"][:remaining])
+
+    responsive_hosts.sort(key=lambda value: int(ip_address(value)))
+    hostnames = {}
+    if global_settings.reverse_dns_enabled:
+        for host in responsive_hosts:
+            hostname = reverse_dns(host)
+            if hostname:
+                hostnames[host] = hostname
+
+    return {
+        "scanned_hosts": len(hosts),
+        "responsive_hosts": responsive_hosts,
+        "open_ports": open_ports,
+        "hostnames": hostnames,
+        "errors": errors,
+        "ports": ports,
+        "timeout_seconds": timeout,
+        "worker_count": worker_count,
+    }
 
 
 def build_scan_request(
