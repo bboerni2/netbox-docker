@@ -9,7 +9,14 @@ from .models import GlobalSettings, RangePolicy, ScanRun
 class GlobalSettingsFilterSet(NetBoxModelFilterSet):
     class Meta:
         model = GlobalSettings
-        fields = ("name", "enabled", "schedule_mode")
+        fields = (
+            "name",
+            "enabled",
+            "schedule_mode",
+            "default_scan_interval_minutes",
+            "deprecated_last_seen_days",
+            "deprecated_grace_period_days",
+        )
 
     def search(self, queryset, name, value):
         if not value:

@@ -39,7 +39,7 @@ def get_policy_schedule(policy: RangePolicy, global_settings: GlobalSettings) ->
     mode = global_settings.schedule_mode if policy.schedule_mode == RangePolicy.ScheduleModeChoices.INHERIT else policy.schedule_mode
     return (
         mode,
-        policy.interval_minutes if mode == RangePolicy.ScheduleModeChoices.INTERVAL and policy.schedule_mode != RangePolicy.ScheduleModeChoices.INHERIT else global_settings.default_interval_minutes,
+        policy.interval_minutes if mode == RangePolicy.ScheduleModeChoices.INTERVAL and policy.schedule_mode != RangePolicy.ScheduleModeChoices.INHERIT else global_settings.default_scan_interval_minutes,
         policy.cron_expressions if mode == RangePolicy.ScheduleModeChoices.CRON and policy.schedule_mode != RangePolicy.ScheduleModeChoices.INHERIT else global_settings.default_cron_expressions,
     )
 

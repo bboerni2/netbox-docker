@@ -38,16 +38,18 @@ class IntervalFieldsMixin:
 class GlobalSettingsForm(IntervalFieldsMixin, NetBoxModelForm):
     interval_value = forms.IntegerField(min_value=1, required=False, label="Interval")
     interval_unit = forms.ChoiceField(choices=INTERVAL_UNITS, required=False, initial="minutes", label="Unit")
-    default_interval_minutes = forms.IntegerField(required=False)
+    default_scan_interval_minutes = forms.IntegerField(required=False)
 
     fieldsets = (
         FieldSet(
             "name",
             "enabled",
             "schedule_mode",
-            InlineFields("interval_value", "interval_unit", label="Interval"),
+            InlineFields("interval_value", "interval_unit", label="Default scan interval"),
             "default_cron_expressions",
             "max_concurrent_scans",
+            "deprecated_last_seen_days",
+            "deprecated_grace_period_days",
         ),
     )
 
@@ -57,14 +59,25 @@ class GlobalSettingsForm(IntervalFieldsMixin, NetBoxModelForm):
             "name",
             "enabled",
             "schedule_mode",
-            "default_interval_minutes",
+            "default_scan_interval_minutes",
             "default_cron_expressions",
             "max_concurrent_scans",
+            "deprecated_last_seen_days",
+            "deprecated_grace_period_days",
         )
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self._set_interval_initial(self.instance.default_interval_minutes)
+        self._set_interval_initial(self.instance.default_scan_interval_minutes)
+        self.fields["default_scan_interval_minutes"].label = "Default scan interval"
+        self.fields["deprecated_last_seen_days"].label = "Deprecated last seen"
+        self.fields["deprecated_last_seen_days"].help_text = (
+            "Days an active IP must be unseen before it is marked deprecated."
+        )
+        self.fields["deprecated_grace_period_days"].label = "Deprecated grace period"
+        self.fields["deprecated_grace_period_days"].help_text = (
+            "Days a deprecated IP remains reserved before it can be marked free."
+        )
         self.fields["default_cron_expressions"].help_text = CRON_HELP_TEXT
 
     def clean(self):
@@ -72,7 +85,7 @@ class GlobalSettingsForm(IntervalFieldsMixin, NetBoxModelForm):
         cleaned_data = self.cleaned_data
         self._clean_interval(
             cleaned_data.get("schedule_mode"),
-            "default_interval_minutes",
+            "default_scan_interval_minutes",
             preserve_when_inactive=True,
         )
         return cleaned_data

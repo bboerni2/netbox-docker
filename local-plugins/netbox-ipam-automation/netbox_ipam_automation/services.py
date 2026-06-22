@@ -7,6 +7,8 @@ from croniter import croniter
 from django.db import transaction
 from django.utils import timezone as django_timezone
 
+MANAGED_IP_STATUSES = {"active", "free", "deprecated"}
+
 
 def normalize_cidr(value: str) -> str:
     return str(ip_network(value, strict=False))
@@ -170,6 +172,79 @@ def classify_scan_result(
     if responsive_hosts > 0:
         return "responsive"
     return "quiet"
+
+
+def parse_deprecated_since(description: str) -> datetime | None:
+    if not description.startswith("Deprecated since "):
+        return None
+    try:
+        return datetime.strptime(description.replace("Deprecated since ", "").strip(), "%Y-%m-%d").replace(
+            tzinfo=timezone.utc
+        )
+    except ValueError:
+        return None
+
+
+def apply_scan_observations(policy, responsive_hosts, *, global_settings, now=None) -> dict[str, int]:
+    from ipam.models import IPAddress
+
+    now = now or django_timezone.now()
+    network = ip_range_to_network(policy.target_range.start_address, policy.target_range.end_address)
+    responsive = {ip_address(str(host).split("/", 1)[0]) for host in responsive_hosts}
+    deprecated_cutoff = now - timedelta(days=global_settings.deprecated_last_seen_days)
+    free_cutoff_days = global_settings.deprecated_grace_period_days
+    summary = {
+        "observed_hosts": 0,
+        "responsive_hosts": 0,
+        "updated": 0,
+        "skipped_protected": 0,
+    }
+
+    for ip_obj in IPAddress.objects.filter(vrf_id=policy.target_range.vrf_id):
+        host = ip_address(str(ip_obj.address).split("/", 1)[0])
+        if host not in network:
+            continue
+
+        summary["observed_hosts"] += 1
+        is_responsive = host in responsive
+        if is_responsive:
+            summary["responsive_hosts"] += 1
+
+        if ip_obj.status not in MANAGED_IP_STATUSES:
+            summary["skipped_protected"] += 1
+            continue
+
+        update_fields = []
+        if is_responsive:
+            if ip_obj.status != "active":
+                ip_obj.status = "active"
+                update_fields.append("status")
+            if ip_obj.description.startswith("Deprecated since "):
+                ip_obj.description = ""
+                update_fields.append("description")
+        elif ip_obj.status == "active":
+            if ip_obj.last_updated and ip_obj.last_updated <= deprecated_cutoff:
+                ip_obj.status = "deprecated"
+                ip_obj.description = f"Deprecated since {now.date().isoformat()}"
+                update_fields.extend(("status", "description"))
+        elif ip_obj.status == "deprecated":
+            deprecated_since = parse_deprecated_since(ip_obj.description)
+            if deprecated_since and (now.date() - deprecated_since.date()).days >= free_cutoff_days:
+                ip_obj.status = "free"
+                ip_obj.description = ""
+                ip_obj.dns_name = ""
+                update_fields.extend(("status", "description", "dns_name"))
+        elif ip_obj.status == "free" and (ip_obj.description or ip_obj.dns_name):
+            ip_obj.description = ""
+            ip_obj.dns_name = ""
+            update_fields.extend(("description", "dns_name"))
+
+        if update_fields:
+            ip_obj.full_clean()
+            ip_obj.save(update_fields=(*update_fields, "last_updated"))
+            summary["updated"] += 1
+
+    return summary
 
 
 def build_scan_request(

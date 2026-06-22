@@ -21,9 +21,11 @@ class GlobalSettingsPanel(ObjectAttributesPanel):
     name = attrs.TextAttr("name", label="Name")
     enabled = attrs.BooleanAttr("enabled", label="Enabled")
     schedule_mode = attrs.ChoiceAttr("schedule_mode", label="Schedule mode")
-    default_interval_minutes = attrs.NumericAttr("default_interval_minutes", label="Default interval")
+    default_scan_interval_minutes = attrs.NumericAttr("default_scan_interval_minutes", label="Default scan interval")
     default_cron_expressions = attrs.TextAttr("default_cron_expressions", label="Default cron expressions")
     max_concurrent_scans = attrs.NumericAttr("max_concurrent_scans", label="Max concurrent scans")
+    deprecated_last_seen_days = attrs.NumericAttr("deprecated_last_seen_days", label="Deprecated last seen")
+    deprecated_grace_period_days = attrs.NumericAttr("deprecated_grace_period_days", label="Deprecated grace period")
 
 
 class RangePolicyPanel(ObjectAttributesPanel):

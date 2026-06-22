@@ -25,9 +25,11 @@ class GlobalSettings(NetBoxModel):
     name = models.CharField(max_length=100, unique=True, default="default")
     enabled = models.BooleanField(default=True)
     schedule_mode = models.CharField(max_length=16, choices=ScheduleModeChoices, default=ScheduleModeChoices.INTERVAL)
-    default_interval_minutes = models.PositiveIntegerField(default=60)
+    default_scan_interval_minutes = models.PositiveIntegerField(default=60)
     default_cron_expressions = models.TextField(default="0 * * * *")
     max_concurrent_scans = models.PositiveIntegerField(default=1)
+    deprecated_last_seen_days = models.PositiveIntegerField(default=2)
+    deprecated_grace_period_days = models.PositiveIntegerField(default=14)
 
     class Meta:
         ordering = ("name",)
@@ -39,10 +41,14 @@ class GlobalSettings(NetBoxModel):
 
     def clean(self) -> None:
         super().clean()
-        if self.default_interval_minutes < 1:
-            raise ValidationError("default_interval_minutes must be >= 1.")
+        if self.default_scan_interval_minutes < 1:
+            raise ValidationError("default_scan_interval_minutes must be >= 1.")
         if self.max_concurrent_scans < 1:
             raise ValidationError("max_concurrent_scans must be >= 1.")
+        if self.deprecated_last_seen_days < 1:
+            raise ValidationError("deprecated_last_seen_days must be >= 1.")
+        if self.deprecated_grace_period_days < 1:
+            raise ValidationError("deprecated_grace_period_days must be >= 1.")
         try:
             self.default_cron_expressions = normalize_cron_expressions(self.default_cron_expressions)
         except ValueError as exc:
@@ -132,9 +138,9 @@ class RangePolicy(OrganizationalModel):
 
 class ScanRun(JobsMixin, PrimaryModel):
     class StatusChoices(models.TextChoices):
-        QUEUED = "queued", "Queued"
+        QUEUED = "queued", "Starting"
         RUNNING = "running", "Running"
-        COMPLETED = "completed", "Completed"
+        COMPLETED = "completed", "Success"
         PARTIAL = "partial", "Partial"
         FAILED = "failed", "Failed"
         CANCELLED = "cancelled", "Cancelled"
@@ -201,6 +207,14 @@ class ScanRun(JobsMixin, PrimaryModel):
                 self.target_cidr = normalize_cidr(self.target_cidr)
         if self.observed_hosts and self.responsive_hosts > self.observed_hosts:
             raise ValidationError("responsive_hosts cannot exceed observed_hosts.")
+
+    @property
+    def duration(self):
+        if not self.started_at:
+            return None
+        from django.utils import timezone
+
+        return (self.finished_at or timezone.now()) - self.started_at
 
     def get_absolute_url(self):
         return reverse(f"plugins:netbox_ipam_automation:{self._meta.model_name}", args=[self.pk])

@@ -1,4 +1,5 @@
 import django_tables2 as tables
+from django.utils.timesince import timesince
 from netbox.tables import NetBoxTable, columns
 
 from .models import GlobalSettings, RangePolicy, ScanRun
@@ -6,6 +7,9 @@ from .models import GlobalSettings, RangePolicy, ScanRun
 
 class GlobalSettingsTable(NetBoxTable):
     name = tables.Column(linkify=True)
+    default_scan_interval_minutes = tables.Column(verbose_name="Default scan interval")
+    deprecated_last_seen_days = tables.Column(verbose_name="Deprecated last seen")
+    deprecated_grace_period_days = tables.Column(verbose_name="Deprecated grace period")
 
     class Meta(NetBoxTable.Meta):
         model = GlobalSettings
@@ -14,11 +18,20 @@ class GlobalSettingsTable(NetBoxTable):
             "name",
             "enabled",
             "schedule_mode",
-            "default_interval_minutes",
+            "default_scan_interval_minutes",
             "default_cron_expressions",
             "max_concurrent_scans",
+            "deprecated_last_seen_days",
+            "deprecated_grace_period_days",
         )
-        default_columns = ("name", "enabled", "default_interval_minutes", "max_concurrent_scans")
+        default_columns = (
+            "name",
+            "enabled",
+            "default_scan_interval_minutes",
+            "max_concurrent_scans",
+            "deprecated_last_seen_days",
+            "deprecated_grace_period_days",
+        )
 
 
 class RangePolicyTable(NetBoxTable):
@@ -44,8 +57,16 @@ class RangePolicyTable(NetBoxTable):
 
 
 class ScanRunTable(NetBoxTable):
-    id = tables.Column(linkify=True)
-    policy = tables.Column(linkify=True)
+    id = tables.Column(linkify=True, verbose_name="Task ID")
+    policy = tables.Column(linkify=True, verbose_name="Task")
+    status = columns.ChoiceFieldColumn()
+    duration = tables.Column(empty_values=(), orderable=False)
+
+    def render_duration(self, record):
+        if not record.started_at:
+            return "—"
+        end = record.finished_at or record.last_updated
+        return timesince(record.started_at, end)
 
     class Meta(NetBoxTable.Meta):
         model = ScanRun
@@ -54,11 +75,13 @@ class ScanRunTable(NetBoxTable):
             "id",
             "policy",
             "status",
+            "requested_by",
             "trigger",
             "classification",
             "target_cidr",
             "scheduled_for",
             "started_at",
             "finished_at",
+            "duration",
         )
-        default_columns = ("id", "policy", "status", "trigger", "classification", "target_cidr", "scheduled_for")
+        default_columns = ("id", "policy", "status", "requested_by", "started_at", "duration", "trigger", "target_cidr")

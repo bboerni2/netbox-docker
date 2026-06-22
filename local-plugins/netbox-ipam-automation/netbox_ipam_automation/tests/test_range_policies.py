@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 from django.core.exceptions import ValidationError
@@ -9,6 +9,7 @@ from netbox_ipam_automation.forms import GlobalSettingsForm, RangePolicyForm
 from netbox_ipam_automation.jobs import create_due_scheduled_scan_runs
 from netbox_ipam_automation.models import GlobalSettings, RangePolicy, ScanRun
 from netbox_ipam_automation.services import (
+    apply_scan_observations,
     due_time_for_cron,
     initialize_range_policy,
     parse_cron_expressions,
@@ -50,7 +51,7 @@ class RangePolicyTest(TestCase):
 
         self.assertEqual(form.fields["enabled"].label, "Schedule enabled")
         self.assertEqual(dict(form.fields["schedule_mode"].choices)["inherit"], "Global default")
-        self.assertIn("without CIDR notation", form.fields["scan_start"].help_text)
+        self.assertIn("auto-select the first address", form.fields["scan_start"].help_text)
         self.assertIn("one five-field cron expression per line", form.fields["cron_expressions"].help_text)
 
     def test_initialization_creates_only_missing_special_addresses(self):
@@ -101,11 +102,11 @@ class SchedulingTest(TestCase):
     def test_global_cron_mode_does_not_clear_interval_fallback(self):
         settings = GlobalSettings(
             schedule_mode="cron",
-            default_interval_minutes=60,
+            default_scan_interval_minutes=60,
             default_cron_expressions="0 * * * *",
         )
         settings.full_clean()
-        self.assertEqual(settings.default_interval_minutes, 60)
+        self.assertEqual(settings.default_scan_interval_minutes, 60)
 
         form = GlobalSettingsForm(
             data={
@@ -114,11 +115,23 @@ class SchedulingTest(TestCase):
                 "schedule_mode": "cron",
                 "default_cron_expressions": "0 * * * *",
                 "max_concurrent_scans": 1,
+                "deprecated_last_seen_days": 2,
+                "deprecated_grace_period_days": 14,
             },
             instance=settings,
         )
         self.assertTrue(form.is_valid(), form.errors)
-        self.assertEqual(form.save(commit=False).default_interval_minutes, 60)
+        self.assertEqual(form.save(commit=False).default_scan_interval_minutes, 60)
+
+    def test_global_deprecation_defaults_are_validated(self):
+        settings = GlobalSettings(deprecated_last_seen_days=2, deprecated_grace_period_days=14)
+        settings.full_clean()
+
+        with self.assertRaises(ValidationError):
+            GlobalSettings(deprecated_last_seen_days=0, deprecated_grace_period_days=14).full_clean()
+
+        with self.assertRaises(ValidationError):
+            GlobalSettings(deprecated_last_seen_days=2, deprecated_grace_period_days=0).full_clean()
 
     @patch("netbox_ipam_automation.jobs.enqueue_scan_run")
     def test_scheduler_does_not_create_duplicate_cron_runs(self, enqueue_scan_run):
@@ -143,3 +156,63 @@ class SchedulingTest(TestCase):
         self.assertEqual(create_due_scheduled_scan_runs(now=now)["created"], 0)
         self.assertEqual(ScanRun.objects.filter(policy=policy).count(), 1)
         enqueue_scan_run.assert_called_once()
+
+
+class ScanStatusPolicyTest(TestCase):
+    def setUp(self):
+        self.ip_range = IPRange(
+            start_address="192.0.2.0/29",
+            end_address="192.0.2.7/29",
+            status="active",
+        )
+        self.ip_range.full_clean()
+        self.ip_range.save()
+        self.policy = RangePolicy(name="Scan status policy", target_range=self.ip_range)
+        self.policy.full_clean()
+        self.policy.save()
+        self.settings = GlobalSettings(
+            deprecated_last_seen_days=2,
+            deprecated_grace_period_days=14,
+        )
+
+    def _create_ip(self, address, status, **kwargs):
+        ip = IPAddress(address=address, status=status, **kwargs)
+        ip.save()
+        return ip
+
+    def test_scan_observations_change_only_managed_statuses(self):
+        now = datetime(2026, 1, 20, 12, 0, tzinfo=timezone.utc)
+        active = self._create_ip("192.0.2.1/29", "active")
+        free = self._create_ip("192.0.2.2/29", "free", description="old", dns_name="old.example")
+        deprecated = self._create_ip("192.0.2.3/29", "deprecated", description="Deprecated since 2026-01-01")
+        reserved = self._create_ip("192.0.2.4/29", "reserved")
+        gateway = self._create_ip("192.0.2.5/29", "gateway")
+        dhcp = self._create_ip("192.0.2.6/29", "dhcp")
+        custom = self._create_ip("192.0.2.7/29", "custom")
+        old_seen = now - timedelta(days=3)
+        IPAddress.objects.filter(pk=active.pk).update(last_updated=old_seen)
+
+        summary = apply_scan_observations(
+            self.policy,
+            responsive_hosts={"192.0.2.2", "192.0.2.4", "192.0.2.5", "192.0.2.6", "192.0.2.7"},
+            global_settings=self.settings,
+            now=now,
+        )
+
+        active.refresh_from_db()
+        free.refresh_from_db()
+        deprecated.refresh_from_db()
+        reserved.refresh_from_db()
+        gateway.refresh_from_db()
+        dhcp.refresh_from_db()
+        custom.refresh_from_db()
+
+        self.assertEqual(active.status, "deprecated")
+        self.assertEqual(free.status, "active")
+        self.assertEqual(free.description, "old")
+        self.assertEqual(deprecated.status, "free")
+        self.assertEqual(reserved.status, "reserved")
+        self.assertEqual(gateway.status, "gateway")
+        self.assertEqual(dhcp.status, "dhcp")
+        self.assertEqual(custom.status, "custom")
+        self.assertEqual(summary["skipped_protected"], 4)
