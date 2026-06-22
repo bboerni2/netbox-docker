@@ -5,6 +5,7 @@ from django.core.exceptions import ValidationError
 from django.db import models
 from django.urls import reverse
 from netbox.models import NetBoxModel, OrganizationalModel, PrimaryModel
+from netbox.models.features import JobsMixin
 
 from .services import normalize_cidr
 
@@ -41,6 +42,10 @@ class GlobalSettings(NetBoxModel):
 
     def clean(self) -> None:
         super().clean()
+        if self.default_interval_minutes < 1:
+            raise ValidationError("default_interval_minutes must be >= 1.")
+        if self.max_concurrent_scans < 1:
+            raise ValidationError("max_concurrent_scans must be >= 1.")
         queryset = type(self).objects.exclude(pk=self.pk)
         if queryset.exists():
             raise ValidationError("Only one global settings object is supported.")
@@ -80,6 +85,8 @@ class RangePolicy(OrganizationalModel):
 
     def clean(self) -> None:
         super().clean()
+        if self.interval_minutes is not None and self.interval_minutes < 1:
+            raise ValidationError("interval_minutes must be >= 1.")
         if self.target_range:
             self.target_cidr = ip_range_to_target(self.target_range)
         elif self.target_cidr:
@@ -91,7 +98,7 @@ class RangePolicy(OrganizationalModel):
         return reverse(f"plugins:netbox_ipam_automation:{self._meta.model_name}", args=[self.pk])
 
 
-class ScanRun(PrimaryModel):
+class ScanRun(JobsMixin, PrimaryModel):
     class StatusChoices(models.TextChoices):
         QUEUED = "queued", "Queued"
         RUNNING = "running", "Running"

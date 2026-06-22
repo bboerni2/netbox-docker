@@ -3,7 +3,7 @@ from ipam.models import IPRange
 from utilities.forms.fields import DynamicModelChoiceField
 from utilities.forms.rendering import FieldSet
 
-from .models import GlobalSettings, RangePolicy, ScanRun, ip_range_to_target
+from .models import GlobalSettings, RangePolicy, ScanRun
 
 
 class GlobalSettingsForm(NetBoxModelForm):
@@ -33,7 +33,7 @@ class GlobalSettingsForm(NetBoxModelForm):
 class RangePolicyForm(NetBoxModelForm):
     target_range = DynamicModelChoiceField(
         queryset=IPRange.objects.all(),
-        required=True,
+        required=False,
         label="IP range",
         selector=True,
     )
@@ -43,6 +43,7 @@ class RangePolicyForm(NetBoxModelForm):
             "name",
             "slug",
             "target_range",
+            "target_cidr",
             name="Target",
         ),
         FieldSet(
@@ -65,6 +66,7 @@ class RangePolicyForm(NetBoxModelForm):
             "name",
             "slug",
             "target_range",
+            "target_cidr",
             "enabled",
             "interval_minutes",
             "cron_expressions",
@@ -92,14 +94,11 @@ class ScanRunCreateForm(NetBoxModelForm):
         )
 
     def save(self, commit=True):
+        from .jobs import submit_manual_scan_run
+
         instance = super().save(commit=False)
-        instance.status = ScanRun.StatusChoices.QUEUED
-        instance.trigger = ScanRun.TriggerChoices.MANUAL
-        instance.classification = ScanRun.ClassificationChoices.PENDING
-        if instance.policy:
-            instance.target_cidr = instance.policy.target_cidr or ip_range_to_target(instance.policy.target_range)
         if commit:
-            instance.save()
+            instance = submit_manual_scan_run(instance)
             self.save_m2m()
         return instance
 

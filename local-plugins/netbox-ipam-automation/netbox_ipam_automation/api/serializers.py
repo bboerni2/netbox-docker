@@ -47,6 +47,13 @@ class RangePolicySerializer(NetBoxModelSerializer):
 
 
 class ScanRunSerializer(NetBoxModelSerializer):
+    def create(self, validated_data):
+        from ..jobs import submit_manual_scan_run
+
+        request = self.context.get("request")
+        requested_by = request.user if request and request.user.is_authenticated else None
+        return submit_manual_scan_run(ScanRun(**validated_data), requested_by=requested_by)
+
     class Meta:
         model = ScanRun
         fields = (
