@@ -33,7 +33,7 @@ class RangePolicyPanel(ObjectAttributesPanel):
     target_cidr = attrs.TextAttr("target_cidr", label="Target CIDR")
     scan_start = attrs.TextAttr("scan_start", label="Scan start")
     scan_end = attrs.TextAttr("scan_end", label="Scan end")
-    enabled = attrs.BooleanAttr("enabled", label="Enabled")
+    enabled = attrs.BooleanAttr("enabled", label="Schedule enabled")
     schedule_mode = attrs.ChoiceAttr("schedule_mode", label="Schedule mode")
     interval_minutes = attrs.NumericAttr("interval_minutes", label="Interval")
     cron_expressions = attrs.TextAttr("cron_expressions", label="Cron expressions")

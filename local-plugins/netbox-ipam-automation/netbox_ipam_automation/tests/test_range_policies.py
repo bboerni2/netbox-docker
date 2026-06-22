@@ -5,7 +5,7 @@ from django.core.exceptions import ValidationError
 from django.test import TestCase
 from ipam.models import IPAddress, IPRange
 
-from netbox_ipam_automation.forms import GlobalSettingsForm
+from netbox_ipam_automation.forms import GlobalSettingsForm, RangePolicyForm
 from netbox_ipam_automation.jobs import create_due_scheduled_scan_runs
 from netbox_ipam_automation.models import GlobalSettings, RangePolicy, ScanRun
 from netbox_ipam_automation.services import (
@@ -44,6 +44,14 @@ class RangePolicyTest(TestCase):
 
         with self.assertRaises(ValidationError):
             policy.full_clean()
+
+    def test_form_explains_address_and_schedule_inputs(self):
+        form = RangePolicyForm()
+
+        self.assertEqual(form.fields["enabled"].label, "Schedule enabled")
+        self.assertEqual(dict(form.fields["schedule_mode"].choices)["inherit"], "Global default")
+        self.assertIn("without CIDR notation", form.fields["scan_start"].help_text)
+        self.assertIn("one five-field cron expression per line", form.fields["cron_expressions"].help_text)
 
     def test_initialization_creates_only_missing_special_addresses(self):
         policy = RangePolicy(name="Initialized range", target_range=self.ip_range)

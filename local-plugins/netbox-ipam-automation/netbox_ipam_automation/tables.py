@@ -23,6 +23,7 @@ class GlobalSettingsTable(NetBoxTable):
 
 class RangePolicyTable(NetBoxTable):
     name = tables.Column(linkify=True)
+    enabled = tables.BooleanColumn(verbose_name="Schedule enabled")
 
     class Meta(NetBoxTable.Meta):
         model = RangePolicy
