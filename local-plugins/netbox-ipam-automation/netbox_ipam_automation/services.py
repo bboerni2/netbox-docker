@@ -1,11 +1,54 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from ipaddress import ip_network
+from ipaddress import IPv4Address, IPv4Network, ip_address, ip_network, summarize_address_range
+
+from croniter import croniter
+from django.db import transaction
+from django.utils import timezone as django_timezone
 
 
 def normalize_cidr(value: str) -> str:
     return str(ip_network(value, strict=False))
+
+
+def ip_range_to_network(start_address, end_address) -> IPv4Network:
+    start = ip_address(str(start_address).split("/")[0])
+    end = ip_address(str(end_address).split("/")[0])
+    if start.version != 4 or end.version != 4:
+        raise ValueError("Only IPv4 ranges are supported.")
+
+    networks = list(summarize_address_range(start, end))
+    if len(networks) != 1:
+        raise ValueError("The target IP range must match one exact IPv4 subnet.")
+
+    network = networks[0]
+    if network.network_address != start or network.broadcast_address != end:
+        raise ValueError("The target IP range must span the full IPv4 subnet, including network and broadcast.")
+
+    return network
+
+
+def parse_cron_expressions(value: str) -> list[str]:
+    expressions: list[str] = []
+    seen: set[str] = set()
+
+    for raw_expression in value.splitlines():
+        expression = " ".join(raw_expression.split())
+        if not expression:
+            continue
+        if len(expression.split()) != 5:
+            raise ValueError(f"Invalid cron expression '{expression}': exactly five fields are required.")
+        croniter(expression)
+        if expression not in seen:
+            seen.add(expression)
+            expressions.append(expression)
+
+    return expressions
+
+
+def normalize_cron_expressions(value: str) -> str:
+    return "\n".join(parse_cron_expressions(value))
 
 
 def next_scheduled_for(
@@ -35,6 +78,46 @@ def is_due_for_interval(
     ) <= now
 
 
+def due_time_for_cron(
+    cron_expressions: str,
+    *,
+    now: datetime,
+    last_scheduled_for: datetime | None = None,
+) -> datetime | None:
+    current_minute = django_timezone.localtime(now).replace(second=0, microsecond=0)
+    due_matches = [
+        expression
+        for expression in parse_cron_expressions(cron_expressions)
+        if croniter(expression, current_minute - timedelta(seconds=1)).get_next(datetime) == current_minute
+    ]
+    if not due_matches:
+        return None
+    if last_scheduled_for and last_scheduled_for >= current_minute:
+        return None
+    return current_minute
+
+
+def due_time_for_candidate(candidate: dict[str, object], *, now: datetime) -> datetime | None:
+    schedule_mode = str(candidate["schedule_mode"])
+    last_scheduled_for = candidate.get("last_scheduled_for")
+
+    if schedule_mode == "interval":
+        interval_minutes = int(candidate["interval_minutes"])
+        if last_scheduled_for is None:
+            return now
+        due_at = next_scheduled_for(interval_minutes, last_scheduled_for=last_scheduled_for, now=now)
+        return due_at if due_at <= now else None
+
+    if schedule_mode == "cron":
+        return due_time_for_cron(
+            str(candidate["cron_expressions"]),
+            now=now,
+            last_scheduled_for=last_scheduled_for,
+        )
+
+    raise ValueError(f"Unsupported schedule mode '{schedule_mode}'.")
+
+
 def select_due_candidates(
     candidates: list[dict[str, object]],
     *,
@@ -49,6 +132,7 @@ def select_due_candidates(
 
     due_candidates: list[dict[str, object]] = []
     active_keys = active_keys or set()
+    current_minute = now.replace(second=0, microsecond=0)
 
     for candidate in candidates:
         if candidate.get("key") in active_keys:
@@ -56,15 +140,11 @@ def select_due_candidates(
         if not candidate.get("enabled", True):
             continue
 
-        interval_minutes = int(candidate["interval_minutes"])
-        if not is_due_for_interval(
-            interval_minutes,
-            now=now,
-            last_scheduled_for=candidate.get("last_scheduled_for"),
-        ):
+        due_at = due_time_for_candidate(candidate, now=current_minute)
+        if due_at is None:
             continue
 
-        due_candidates.append(candidate)
+        due_candidates.append({**candidate, "scheduled_for": due_at})
         if len(due_candidates) >= max_new_runs:
             break
 
@@ -108,21 +188,112 @@ def build_scan_request(
     }
 
 
+def minutes_to_interval_parts(minutes: int | None) -> tuple[int | None, str]:
+    if not minutes:
+        return None, "minutes"
+    for unit, factor in (("weeks", 10080), ("days", 1440), ("hours", 60), ("minutes", 1)):
+        if minutes % factor == 0:
+            return minutes // factor, unit
+    return minutes, "minutes"
+
+
+def interval_parts_to_minutes(value: int | None, unit: str | None) -> int | None:
+    if value in (None, ""):
+        return None
+    factor = {
+        "minutes": 1,
+        "hours": 60,
+        "days": 1440,
+        "weeks": 10080,
+    }.get(unit or "minutes")
+    if factor is None:
+        raise ValueError(f"Unsupported interval unit '{unit}'.")
+    if int(value) < 1:
+        raise ValueError("Interval value must be at least 1.")
+    return int(value) * factor
+
+
+def as_ipv4_address(value: str | None, *, field_name: str) -> IPv4Address | None:
+    if not value:
+        return None
+    parsed = ip_address(value)
+    if parsed.version != 4:
+        raise ValueError(f"{field_name} must be an IPv4 address.")
+    return parsed
+
+
+def preview_range_policy_initialization(policy, gateway) -> list[dict[str, object]]:
+    from ipam.models import IPAddress
+
+    if not policy.target_range_id:
+        raise ValueError("The policy has no target IP range.")
+    network = ip_range_to_network(policy.target_range.start_address, policy.target_range.end_address)
+    gateway = as_ipv4_address(str(gateway), field_name="Gateway")
+    if gateway not in network:
+        raise ValueError(f"Gateway must be inside {network}.")
+    if gateway in (network.network_address, network.broadcast_address):
+        raise ValueError("Gateway must differ from the network and broadcast addresses.")
+
+    desired = (
+        (network.network_address, "reserved", "Network"),
+        (network.broadcast_address, "reserved", "Broadcast"),
+        (gateway, "gateway", "Gateway"),
+    )
+    return [
+        {
+            "address": f"{address}/{network.prefixlen}",
+            "status": status,
+            "purpose": purpose,
+            "exists": IPAddress.objects.filter(
+                address__net_host=str(address),
+                vrf_id=policy.target_range.vrf_id,
+            ).exists(),
+        }
+        for address, status, purpose in desired
+    ]
+
+
+@transaction.atomic
+def initialize_range_policy(policy, gateway) -> int:
+    from ipam.models import IPAddress, IPRange
+
+    policy.target_range = IPRange.objects.select_for_update().get(pk=policy.target_range_id)
+    preview = preview_range_policy_initialization(policy, gateway)
+    created = 0
+    for item in preview:
+        if item["exists"]:
+            continue
+        ip_address_object = IPAddress(
+            address=item["address"],
+            vrf=policy.target_range.vrf,
+            tenant=policy.target_range.tenant,
+            status=item["status"],
+            description=item["purpose"],
+        )
+        ip_address_object.full_clean()
+        ip_address_object.save()
+        created += 1
+    return created
+
+
 if __name__ == "__main__":
     assert normalize_cidr("192.0.2.13/24") == "192.0.2.0/24"
+    assert str(ip_range_to_network("192.0.2.0/30", "192.0.2.3/30")) == "192.0.2.0/30"
+    assert parse_cron_expressions("0 * * * *\n0 * * * *\n*/15 * * * *") == ["0 * * * *", "*/15 * * * *"]
     assert classify_scan_result(observed_hosts=10, responsive_hosts=2, error_count=0) == "responsive"
     assert classify_scan_result(observed_hosts=10, responsive_hosts=0, error_count=0) == "quiet"
     assert classify_scan_result(observed_hosts=0, responsive_hosts=0, error_count=1) == "failed"
     now = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
     due = select_due_candidates(
         [
-            {"key": 1, "enabled": True, "interval_minutes": 60, "last_scheduled_for": None},
-            {"key": 2, "enabled": True, "interval_minutes": 60, "last_scheduled_for": now},
+            {"key": 1, "enabled": True, "schedule_mode": "interval", "interval_minutes": 60, "last_scheduled_for": None},
+            {"key": 2, "enabled": True, "schedule_mode": "interval", "interval_minutes": 60, "last_scheduled_for": now},
             {
                 "key": 3,
                 "enabled": True,
-                "interval_minutes": 60,
-                "last_scheduled_for": now - timedelta(minutes=61),
+                "schedule_mode": "cron",
+                "cron_expressions": "0 * * * *",
+                "last_scheduled_for": now - timedelta(hours=2),
             },
         ],
         now=now,
@@ -130,8 +301,3 @@ if __name__ == "__main__":
         max_new_runs=1,
     )
     assert [item["key"] for item in due] == [3]
-    assert select_due_candidates(
-        [{"key": 1, "enabled": True, "interval_minutes": 60, "last_scheduled_for": None}],
-        now=now,
-        max_new_runs=0,
-    ) == []

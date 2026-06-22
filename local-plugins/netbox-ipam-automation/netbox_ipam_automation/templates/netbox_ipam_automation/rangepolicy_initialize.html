@@ -1,0 +1,44 @@
+{% extends 'generic/_base.html' %}
+{% load form_helpers %}
+
+{% block title %}Initialize {{ object }}{% endblock %}
+
+{% block content %}
+  <div class="row mt-3">
+    <div class="col col-md-8 offset-md-2">
+      <form method="post" class="form">
+        {% csrf_token %}
+        <div class="card">
+          <h2 class="card-header">Initialize {{ object }}</h2>
+          <div class="card-body">
+            {% render_form form %}
+            {% if preview %}
+              <h3 class="mt-4">Preview</h3>
+              <table class="table table-hover">
+                <thead><tr><th>Purpose</th><th>Address</th><th>Status</th><th>Action</th></tr></thead>
+                <tbody>
+                  {% for item in preview %}
+                    <tr>
+                      <td>{{ item.purpose }}</td>
+                      <td>{{ item.address }}</td>
+                      <td>{{ item.status|title }}</td>
+                      <td>{% if item.exists %}Keep existing{% else %}Create{% endif %}</td>
+                    </tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+            {% endif %}
+          </div>
+          <div class="card-footer text-end">
+            <a href="{{ object.get_absolute_url }}" class="btn btn-outline-secondary">Cancel</a>
+            {% if preview %}
+              <button type="submit" name="_confirm" class="btn btn-primary">Confirm</button>
+            {% else %}
+              <button type="submit" name="_preview" class="btn btn-primary">Preview</button>
+            {% endif %}
+          </div>
+        </div>
+      </form>
+    </div>
+  </div>
+{% endblock %}

@@ -1,21 +1,29 @@
 from netbox.ui import attrs, layout
 from netbox.ui.panels import CommentsPanel, JSONPanel, ObjectAttributesPanel
+from netbox.object_actions import CloneObject, DeleteObject, EditObject, ObjectAction
+from django.contrib.auth.mixins import PermissionRequiredMixin
+from django.contrib import messages
+from django.db import transaction
+from django.shortcuts import get_object_or_404, redirect, render
+from django.views import View
+from netbox.context_managers import event_tracking
 from netbox.views.generic import ObjectDeleteView, ObjectEditView, ObjectListView, ObjectView
 from utilities.views import register_model_view
 
 from .filtersets import GlobalSettingsFilterSet, RangePolicyFilterSet, ScanRunFilterSet
-from .forms import GlobalSettingsForm, RangePolicyForm, ScanRunCreateForm, ScanRunForm
+from .forms import GlobalSettingsForm, RangePolicyForm, RangePolicyInitializeForm, ScanRunCreateForm, ScanRunForm
 from .models import GlobalSettings, RangePolicy, ScanRun
+from .services import initialize_range_policy, preview_range_policy_initialization
 from .tables import GlobalSettingsTable, RangePolicyTable, ScanRunTable
 
 
 class GlobalSettingsPanel(ObjectAttributesPanel):
     name = attrs.TextAttr("name", label="Name")
     enabled = attrs.BooleanAttr("enabled", label="Enabled")
+    schedule_mode = attrs.ChoiceAttr("schedule_mode", label="Schedule mode")
     default_interval_minutes = attrs.NumericAttr("default_interval_minutes", label="Default interval")
     default_cron_expressions = attrs.TextAttr("default_cron_expressions", label="Default cron expressions")
     max_concurrent_scans = attrs.NumericAttr("max_concurrent_scans", label="Max concurrent scans")
-    classification_mode = attrs.ChoiceAttr("classification_mode", label="Classification mode")
 
 
 class RangePolicyPanel(ObjectAttributesPanel):
@@ -23,10 +31,12 @@ class RangePolicyPanel(ObjectAttributesPanel):
     slug = attrs.TextAttr("slug", label="Slug")
     target_range = attrs.RelatedObjectAttr("target_range", label="Target IP range", linkify=True)
     target_cidr = attrs.TextAttr("target_cidr", label="Target CIDR")
+    scan_start = attrs.TextAttr("scan_start", label="Scan start")
+    scan_end = attrs.TextAttr("scan_end", label="Scan end")
     enabled = attrs.BooleanAttr("enabled", label="Enabled")
+    schedule_mode = attrs.ChoiceAttr("schedule_mode", label="Schedule mode")
     interval_minutes = attrs.NumericAttr("interval_minutes", label="Interval")
     cron_expressions = attrs.TextAttr("cron_expressions", label="Cron expressions")
-    classification_mode = attrs.ChoiceAttr("classification_mode", label="Classification mode")
     description = attrs.TextAttr("description", label="Description")
 
 
@@ -84,6 +94,48 @@ class RangePolicyView(ObjectView):
     queryset = RangePolicy.objects.all()
     template_name = "generic/object.html"
     layout = layout.SimpleLayout(left_panels=[RangePolicyPanel(), CommentsPanel()])
+
+    class InitializeAction(ObjectAction):
+        name = "initialize"
+        label = "Initialize"
+        permissions_required = {"initialize_rangepolicy"}
+        url_kwargs = ["pk"]
+        template_name = "netbox_ipam_automation/buttons/initialize.html"
+
+    actions = (InitializeAction, CloneObject, EditObject, DeleteObject)
+
+
+@register_model_view(RangePolicy, "initialize")
+class RangePolicyInitializeView(PermissionRequiredMixin, View):
+    permission_required = (
+        "netbox_ipam_automation.view_rangepolicy",
+        "netbox_ipam_automation.initialize_rangepolicy",
+        "ipam.add_ipaddress",
+    )
+    raise_exception = True
+    template_name = "netbox_ipam_automation/rangepolicy_initialize.html"
+
+    def dispatch(self, request, pk, *args, **kwargs):
+        self.object = get_object_or_404(RangePolicy.objects.select_related("target_range"), pk=pk)
+        return super().dispatch(request, pk, *args, **kwargs)
+
+    def get(self, request, *args, **kwargs):
+        return render(request, self.template_name, {"object": self.object, "form": RangePolicyInitializeForm()})
+
+    def post(self, request, *args, **kwargs):
+        form = RangePolicyInitializeForm(request.POST)
+        preview = None
+        if form.is_valid():
+            try:
+                preview = preview_range_policy_initialization(self.object, form.cleaned_data["gateway"])
+                if "_confirm" in request.POST:
+                    with event_tracking(request), transaction.atomic():
+                        created = initialize_range_policy(self.object, form.cleaned_data["gateway"])
+                    messages.success(request, f"Created {created} missing IP address record(s).")
+                    return redirect(self.object.get_absolute_url())
+            except ValueError as exc:
+                form.add_error("gateway", str(exc))
+        return render(request, self.template_name, {"object": self.object, "form": form, "preview": preview})
 
 
 @register_model_view(RangePolicy, "add", path="add", detail=False)

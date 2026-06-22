@@ -12,10 +12,10 @@ class GlobalSettingsSerializer(NetBoxModelSerializer):
             "display",
             "name",
             "enabled",
+            "schedule_mode",
             "default_interval_minutes",
             "default_cron_expressions",
             "max_concurrent_scans",
-            "classification_mode",
             "created",
             "last_updated",
         )
@@ -33,17 +33,19 @@ class RangePolicySerializer(NetBoxModelSerializer):
             "slug",
             "target_range",
             "target_cidr",
+            "scan_start",
+            "scan_end",
             "enabled",
+            "schedule_mode",
             "interval_minutes",
             "cron_expressions",
-            "classification_mode",
             "description",
             "comments",
             "created",
             "last_updated",
         )
         brief_fields = ("id", "url", "display", "name", "slug", "target_range", "target_cidr")
-        read_only_fields = ("target_cidr",)
+        read_only_fields = ("slug", "target_cidr")
 
 
 class ScanRunSerializer(NetBoxModelSerializer):

@@ -1,20 +1,49 @@
+from django import forms
 from netbox.forms import NetBoxModelForm
 from ipam.models import IPRange
 from utilities.forms.fields import DynamicModelChoiceField
-from utilities.forms.rendering import FieldSet
+from utilities.forms.rendering import FieldSet, InlineFields
 
 from .models import GlobalSettings, RangePolicy, ScanRun
+from .services import interval_parts_to_minutes, minutes_to_interval_parts
 
 
-class GlobalSettingsForm(NetBoxModelForm):
+INTERVAL_UNITS = (("minutes", "Minutes"), ("hours", "Hours"), ("days", "Days"), ("weeks", "Weeks"))
+
+
+class IntervalFieldsMixin:
+    def _set_interval_initial(self, minutes):
+        value, unit = minutes_to_interval_parts(minutes)
+        self.fields["interval_value"].initial = value
+        self.fields["interval_unit"].initial = unit
+
+    def _clean_interval(self, mode, interval_field, *, preserve_when_inactive=False):
+        if mode == "interval":
+            try:
+                self.cleaned_data[interval_field] = interval_parts_to_minutes(
+                    self.cleaned_data.get("interval_value"), self.cleaned_data.get("interval_unit")
+                )
+            except ValueError as exc:
+                self.add_error("interval_value", str(exc))
+        elif preserve_when_inactive:
+            self.cleaned_data[interval_field] = getattr(self.instance, interval_field)
+        else:
+            self.cleaned_data[interval_field] = None
+
+
+class GlobalSettingsForm(IntervalFieldsMixin, NetBoxModelForm):
+    interval_value = forms.IntegerField(min_value=1, required=False, label="Interval")
+    interval_unit = forms.ChoiceField(choices=INTERVAL_UNITS, required=False, initial="minutes", label="Unit")
+    default_interval_minutes = forms.IntegerField(required=False)
+
     fieldsets = (
         FieldSet(
             "name",
             "enabled",
-            "default_interval_minutes",
+            "schedule_mode",
+            InlineFields("interval_value", "interval_unit", label="Interval"),
             "default_cron_expressions",
             "max_concurrent_scans",
-            "classification_mode",
         ),
     )
 
@@ -23,17 +52,33 @@ class GlobalSettingsForm(NetBoxModelForm):
         fields = (
             "name",
             "enabled",
+            "schedule_mode",
             "default_interval_minutes",
             "default_cron_expressions",
             "max_concurrent_scans",
-            "classification_mode",
         )
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._set_interval_initial(self.instance.default_interval_minutes)
 
-class RangePolicyForm(NetBoxModelForm):
+    def clean(self):
+        super().clean()
+        cleaned_data = self.cleaned_data
+        self._clean_interval(
+            cleaned_data.get("schedule_mode"),
+            "default_interval_minutes",
+            preserve_when_inactive=True,
+        )
+        return cleaned_data
+
+
+class RangePolicyForm(IntervalFieldsMixin, NetBoxModelForm):
+    interval_value = forms.IntegerField(min_value=1, required=False, label="Interval")
+    interval_unit = forms.ChoiceField(choices=INTERVAL_UNITS, required=False, initial="minutes", label="Unit")
     target_range = DynamicModelChoiceField(
         queryset=IPRange.objects.all(),
-        required=False,
+        required=True,
         label="IP range",
         selector=True,
     )
@@ -41,21 +86,21 @@ class RangePolicyForm(NetBoxModelForm):
     fieldsets = (
         FieldSet(
             "name",
-            "slug",
             "target_range",
-            "target_cidr",
+            "scan_start",
+            "scan_end",
             name="Target",
         ),
         FieldSet(
             "enabled",
-            "interval_minutes",
+            "schedule_mode",
+            InlineFields("interval_value", "interval_unit", label="Interval"),
             "cron_expressions",
             name="Schedule",
         ),
         FieldSet(
-            "classification_mode",
             "description",
-            name="Classification",
+            name="Details",
         ),
         FieldSet("comments", name="Comments"),
     )
@@ -64,16 +109,30 @@ class RangePolicyForm(NetBoxModelForm):
         model = RangePolicy
         fields = (
             "name",
-            "slug",
             "target_range",
-            "target_cidr",
+            "scan_start",
+            "scan_end",
             "enabled",
+            "schedule_mode",
             "interval_minutes",
             "cron_expressions",
-            "classification_mode",
             "description",
             "comments",
         )
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._set_interval_initial(self.instance.interval_minutes)
+
+    def clean(self):
+        super().clean()
+        cleaned_data = self.cleaned_data
+        self._clean_interval(cleaned_data.get("schedule_mode"), "interval_minutes")
+        return cleaned_data
+
+
+class RangePolicyInitializeForm(forms.Form):
+    gateway = forms.GenericIPAddressField(protocol="IPv4", required=True)
 
 
 class ScanRunCreateForm(NetBoxModelForm):

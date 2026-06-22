@@ -13,10 +13,10 @@ class GlobalSettingsTable(NetBoxTable):
             "pk",
             "name",
             "enabled",
+            "schedule_mode",
             "default_interval_minutes",
             "default_cron_expressions",
             "max_concurrent_scans",
-            "classification_mode",
         )
         default_columns = ("name", "enabled", "default_interval_minutes", "max_concurrent_scans")
 
@@ -32,12 +32,14 @@ class RangePolicyTable(NetBoxTable):
             "slug",
             "target_range",
             "target_cidr",
+            "scan_start",
+            "scan_end",
             "enabled",
+            "schedule_mode",
             "interval_minutes",
             "cron_expressions",
-            "classification_mode",
         )
-        default_columns = ("name", "target_range", "target_cidr", "enabled", "interval_minutes")
+        default_columns = ("name", "target_range", "scan_start", "scan_end", "enabled", "schedule_mode")
 
 
 class ScanRunTable(NetBoxTable):

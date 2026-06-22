@@ -15,3 +15,6 @@ netbox_ipam_automation = "netbox_ipam_automation:config"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["netbox_ipam_automation*"]
+
+[tool.setuptools.package-data]
+netbox_ipam_automation = ["templates/**/*.html"]

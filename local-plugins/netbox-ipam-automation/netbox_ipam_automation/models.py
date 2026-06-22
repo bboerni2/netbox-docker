@@ -4,33 +4,30 @@ from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.db import models
 from django.urls import reverse
+from django.utils.text import slugify
 from netbox.models import NetBoxModel, OrganizationalModel, PrimaryModel
 from netbox.models.features import JobsMixin
 
-from .services import normalize_cidr
+from .services import as_ipv4_address, ip_range_to_network, normalize_cidr, normalize_cron_expressions
 
 
 def ip_range_to_target(value) -> str:
     if not value:
         return ""
-    return f"{value.start_address}-{value.end_address}"
+    return f"{value.start_address.ip}-{value.end_address.ip}"
 
 
 class GlobalSettings(NetBoxModel):
-    class ClassificationModeChoices(models.TextChoices):
-        STRICT = "strict", "Strict"
-        LENIENT = "lenient", "Lenient"
+    class ScheduleModeChoices(models.TextChoices):
+        INTERVAL = "interval", "Interval"
+        CRON = "cron", "Cron"
 
     name = models.CharField(max_length=100, unique=True, default="default")
     enabled = models.BooleanField(default=True)
+    schedule_mode = models.CharField(max_length=16, choices=ScheduleModeChoices, default=ScheduleModeChoices.INTERVAL)
     default_interval_minutes = models.PositiveIntegerField(default=60)
     default_cron_expressions = models.TextField(default="0 * * * *")
     max_concurrent_scans = models.PositiveIntegerField(default=1)
-    classification_mode = models.CharField(
-        max_length=16,
-        choices=ClassificationModeChoices,
-        default=ClassificationModeChoices.LENIENT,
-    )
 
     class Meta:
         ordering = ("name",)
@@ -46,6 +43,12 @@ class GlobalSettings(NetBoxModel):
             raise ValidationError("default_interval_minutes must be >= 1.")
         if self.max_concurrent_scans < 1:
             raise ValidationError("max_concurrent_scans must be >= 1.")
+        try:
+            self.default_cron_expressions = normalize_cron_expressions(self.default_cron_expressions)
+        except ValueError as exc:
+            raise ValidationError({"default_cron_expressions": str(exc)}) from exc
+        if self.schedule_mode == self.ScheduleModeChoices.CRON and not self.default_cron_expressions:
+            raise ValidationError({"default_cron_expressions": "At least one cron expression is required."})
         queryset = type(self).objects.exclude(pk=self.pk)
         if queryset.exists():
             raise ValidationError("Only one global settings object is supported.")
@@ -55,10 +58,10 @@ class GlobalSettings(NetBoxModel):
 
 
 class RangePolicy(OrganizationalModel):
-    class ClassificationModeChoices(models.TextChoices):
+    class ScheduleModeChoices(models.TextChoices):
         INHERIT = "inherit", "Inherit"
-        STRICT = "strict", "Strict"
-        LENIENT = "lenient", "Lenient"
+        INTERVAL = "interval", "Interval"
+        CRON = "cron", "Cron"
 
     target_cidr = models.CharField(max_length=64, unique=True, null=True, blank=True)
     target_range = models.OneToOneField(
@@ -69,30 +72,59 @@ class RangePolicy(OrganizationalModel):
         related_name="%(app_label)s_policies",
     )
     enabled = models.BooleanField(default=True)
+    scan_start = models.GenericIPAddressField(protocol="IPv4", null=True, blank=True)
+    scan_end = models.GenericIPAddressField(protocol="IPv4", null=True, blank=True)
+    schedule_mode = models.CharField(max_length=16, choices=ScheduleModeChoices, default=ScheduleModeChoices.INHERIT)
     interval_minutes = models.PositiveIntegerField(null=True, blank=True)
     cron_expressions = models.TextField(blank=True)
-    classification_mode = models.CharField(
-        max_length=16,
-        choices=ClassificationModeChoices,
-        default=ClassificationModeChoices.INHERIT,
-    )
 
     class Meta:
         ordering = ("name",)
+        permissions = (("initialize_rangepolicy", "Can initialize range policies"),)
 
     def __str__(self) -> str:
         return self.name
 
+    def full_clean(self, *args, **kwargs):
+        self.slug = slugify(self.name)
+        return super().full_clean(*args, **kwargs)
+
     def clean(self) -> None:
         super().clean()
+        self.slug = slugify(self.name)
         if self.interval_minutes is not None and self.interval_minutes < 1:
             raise ValidationError("interval_minutes must be >= 1.")
-        if self.target_range:
-            self.target_cidr = ip_range_to_target(self.target_range)
-        elif self.target_cidr:
-            self.target_cidr = normalize_cidr(self.target_cidr)
-        else:
-            raise ValidationError("A range policy needs an IP range.")
+        if not self.target_range:
+            raise ValidationError({"target_range": "A target IP range is required."})
+        try:
+            network = ip_range_to_network(self.target_range.start_address, self.target_range.end_address)
+        except ValueError as exc:
+            raise ValidationError({"target_range": str(exc)}) from exc
+        try:
+            scan_start = as_ipv4_address(self.scan_start, field_name="Scan start") or network.network_address
+            scan_end = as_ipv4_address(self.scan_end, field_name="Scan end") or network.broadcast_address
+        except ValueError as exc:
+            raise ValidationError(str(exc)) from exc
+        if scan_start not in network:
+            raise ValidationError({"scan_start": f"Scan start must be inside {network}."})
+        if scan_end not in network:
+            raise ValidationError({"scan_end": f"Scan end must be inside {network}."})
+        if scan_start > scan_end:
+            raise ValidationError("Scan start must not be after scan end.")
+        self.scan_start, self.scan_end = str(scan_start), str(scan_end)
+        self.target_cidr = f"{scan_start}-{scan_end}"
+        try:
+            self.cron_expressions = normalize_cron_expressions(self.cron_expressions)
+        except ValueError as exc:
+            raise ValidationError({"cron_expressions": str(exc)}) from exc
+        if self.schedule_mode == self.ScheduleModeChoices.INTERVAL and not self.interval_minutes:
+            raise ValidationError({"interval_minutes": "An interval is required for interval scheduling."})
+        if self.schedule_mode == self.ScheduleModeChoices.CRON and not self.cron_expressions:
+            raise ValidationError({"cron_expressions": "At least one cron expression is required."})
+
+    def save(self, *args, **kwargs):
+        self.slug = slugify(self.name)
+        return super().save(*args, **kwargs)
 
     def get_absolute_url(self):
         return reverse(f"plugins:netbox_ipam_automation:{self._meta.model_name}", args=[self.pk])

@@ -9,7 +9,7 @@ from .models import GlobalSettings, RangePolicy, ScanRun
 class GlobalSettingsFilterSet(NetBoxModelFilterSet):
     class Meta:
         model = GlobalSettings
-        fields = ("name", "enabled", "classification_mode")
+        fields = ("name", "enabled", "schedule_mode")
 
     def search(self, queryset, name, value):
         if not value:
@@ -21,7 +21,7 @@ class GlobalSettingsFilterSet(NetBoxModelFilterSet):
 class RangePolicyFilterSet(NetBoxModelFilterSet):
     class Meta:
         model = RangePolicy
-        fields = ("name", "slug", "target_range", "target_cidr", "enabled", "classification_mode")
+        fields = ("name", "slug", "target_range", "target_cidr", "enabled", "schedule_mode")
 
     def search(self, queryset, name, value):
         if not value:

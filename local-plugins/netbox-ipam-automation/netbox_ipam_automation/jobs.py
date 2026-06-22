@@ -9,7 +9,6 @@ from .models import GlobalSettings, RangePolicy, ScanRun, ip_range_to_target
 from .services import (
     build_scan_request,
     classify_scan_result,
-    next_scheduled_for,
     select_due_candidates,
 )
 
@@ -36,8 +35,13 @@ def get_policy_target(policy: RangePolicy | None) -> str:
     return policy.target_cidr or ip_range_to_target(policy.target_range)
 
 
-def get_policy_interval_minutes(policy: RangePolicy, global_settings: GlobalSettings) -> int:
-    return policy.interval_minutes or global_settings.default_interval_minutes
+def get_policy_schedule(policy: RangePolicy, global_settings: GlobalSettings) -> tuple[str, int | None, str]:
+    mode = global_settings.schedule_mode if policy.schedule_mode == RangePolicy.ScheduleModeChoices.INHERIT else policy.schedule_mode
+    return (
+        mode,
+        policy.interval_minutes if mode == RangePolicy.ScheduleModeChoices.INTERVAL and policy.schedule_mode != RangePolicy.ScheduleModeChoices.INHERIT else global_settings.default_interval_minutes,
+        policy.cron_expressions if mode == RangePolicy.ScheduleModeChoices.CRON and policy.schedule_mode != RangePolicy.ScheduleModeChoices.INHERIT else global_settings.default_cron_expressions,
+    )
 
 
 def prepare_scan_run(
@@ -99,6 +103,8 @@ def create_due_scheduled_scan_runs(*, now=None) -> dict[str, int]:
 
     candidates = []
     for policy in policies:
+        if not policy.target_range_id:
+            continue
         last_scan_run = (
             ScanRun.objects.filter(
                 policy=policy,
@@ -107,11 +113,14 @@ def create_due_scheduled_scan_runs(*, now=None) -> dict[str, int]:
             .order_by("-scheduled_for", "-created")
             .first()
         )
+        schedule_mode, interval_minutes, cron_expressions = get_policy_schedule(policy, global_settings)
         candidates.append(
             {
                 "key": policy.pk,
                 "enabled": policy.enabled,
-                "interval_minutes": get_policy_interval_minutes(policy, global_settings),
+                "schedule_mode": schedule_mode,
+                "interval_minutes": interval_minutes,
+                "cron_expressions": cron_expressions,
                 "last_scheduled_for": (
                     (last_scan_run.scheduled_for or last_scan_run.created) if last_scan_run else None
                 ),
@@ -131,20 +140,22 @@ def create_due_scheduled_scan_runs(*, now=None) -> dict[str, int]:
         if policy.pk not in due_by_id:
             continue
 
-        candidate = due_by_id[policy.pk]
-        last_scheduled_for = candidate["last_scheduled_for"]
-        scheduled_for = (
-            next_scheduled_for(candidate["interval_minutes"], last_scheduled_for=last_scheduled_for, now=now)
-            if last_scheduled_for
-            else now
-        )
-        scan_run = prepare_scan_run(
-            ScanRun(policy=policy),
-            trigger=ScanRun.TriggerChoices.SCHEDULED,
-            scheduled_for=scheduled_for,
-        )
-        scan_run.full_clean()
-        scan_run.save()
+        scheduled_for = due_by_id[policy.pk]["scheduled_for"]
+        with transaction.atomic():
+            RangePolicy.objects.select_for_update().get(pk=policy.pk)
+            if ScanRun.objects.filter(
+                policy=policy,
+                trigger=ScanRun.TriggerChoices.SCHEDULED,
+                scheduled_for=scheduled_for,
+            ).exists():
+                continue
+            scan_run = prepare_scan_run(
+                ScanRun(policy=policy),
+                trigger=ScanRun.TriggerChoices.SCHEDULED,
+                scheduled_for=scheduled_for,
+            )
+            scan_run.full_clean()
+            scan_run.save()
         enqueue_scan_run(scan_run)
         created += 1
 
