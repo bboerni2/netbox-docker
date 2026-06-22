@@ -10,7 +10,7 @@ from .services import interval_parts_to_minutes, minutes_to_interval_parts
 
 INTERVAL_UNITS = (("minutes", "Minutes"), ("hours", "Hours"), ("days", "Days"), ("weeks", "Weeks"))
 CRON_HELP_TEXT = (
-    "Enter one five-field cron expression per line: minute, hour, day of month, month, day of week. "
+    "Enter one five-field cron expression per line: minute, hour, day of month, month, day of week.\n"
     "Example: 0 2 * * * runs daily at 02:00 in the NetBox timezone."
 )
 
@@ -135,12 +135,10 @@ class RangePolicyForm(IntervalFieldsMixin, NetBoxModelForm):
             (RangePolicy.ScheduleModeChoices.CRON, "Cron"),
         )
         self.fields["scan_start"].help_text = (
-            "Optional IPv4 address without CIDR notation, for example 192.168.50.10. "
-            "Leave blank to use the first address of the selected IP range."
+            "Optional IPv4 address. Leave blank to auto-select the first address."
         )
         self.fields["scan_end"].help_text = (
-            "Optional IPv4 address without CIDR notation, for example 192.168.50.200. "
-            "Leave blank to use the last address of the selected IP range."
+            "Optional IPv4 address. Leave blank to auto-select the last address."
         )
         self.fields["cron_expressions"].help_text = CRON_HELP_TEXT
 
@@ -161,7 +159,7 @@ class ScanRunCreateForm(NetBoxModelForm):
             "policy",
             name="Scan request",
         ),
-        FieldSet("description", "comments", name="Notes"),
+        FieldSet("description", name="Notes"),
     )
 
     class Meta:
@@ -184,7 +182,7 @@ class ScanRunCreateForm(NetBoxModelForm):
 
 class ScanRunForm(NetBoxModelForm):
     fieldsets = (
-        FieldSet("description", "comments", name="Notes"),
+        FieldSet("description", name="Notes"),
     )
 
     class Meta:
