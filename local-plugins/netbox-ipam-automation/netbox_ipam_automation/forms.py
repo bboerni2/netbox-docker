@@ -44,6 +44,7 @@ class GlobalSettingsForm(IntervalFieldsMixin, NetBoxModelForm):
         FieldSet(
             "name",
             "enabled",
+            "scan_all_active_ranges",
             "schedule_mode",
             InlineFields("interval_value", "interval_unit", label="Default scan interval"),
             "default_cron_expressions",
@@ -62,6 +63,7 @@ class GlobalSettingsForm(IntervalFieldsMixin, NetBoxModelForm):
         fields = (
             "name",
             "enabled",
+            "scan_all_active_ranges",
             "schedule_mode",
             "default_scan_interval_minutes",
             "default_cron_expressions",
@@ -78,6 +80,10 @@ class GlobalSettingsForm(IntervalFieldsMixin, NetBoxModelForm):
         super().__init__(*args, **kwargs)
         self._set_interval_initial(self.instance.default_scan_interval_minutes)
         self.fields["default_scan_interval_minutes"].label = "Default scan interval"
+        self.fields["scan_all_active_ranges"].label = "Scan all active IP ranges"
+        self.fields["scan_all_active_ranges"].help_text = (
+            "Automatically scan active IP ranges without a range policy using the default scan interval."
+        )
         self.fields["deprecated_last_seen_days"].label = "Deprecated last seen"
         self.fields["deprecated_last_seen_days"].help_text = (
             "Days an active IP must be unseen before it is marked deprecated."

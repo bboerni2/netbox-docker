@@ -24,6 +24,7 @@ class GlobalSettings(NetBoxModel):
 
     name = models.CharField(max_length=100, unique=True, default="default")
     enabled = models.BooleanField(default=True)
+    scan_all_active_ranges = models.BooleanField(default=False)
     schedule_mode = models.CharField(max_length=16, choices=ScheduleModeChoices, default=ScheduleModeChoices.INTERVAL)
     default_scan_interval_minutes = models.PositiveIntegerField(default=60)
     default_cron_expressions = models.TextField(default="0 * * * *")
@@ -180,6 +181,13 @@ class ScanRun(JobsMixin, PrimaryModel):
         blank=True,
         related_name="%(app_label)s_scan_runs",
     )
+    target_range = models.ForeignKey(
+        to="ipam.IPRange",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="%(app_label)s_scan_runs",
+    )
     requested_by = models.ForeignKey(
         to=settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,
@@ -217,8 +225,12 @@ class ScanRun(JobsMixin, PrimaryModel):
 
     def clean(self) -> None:
         super().clean()
+        if not self.target_range and self.policy:
+            self.target_range = self.policy.target_range
         if not self.target_cidr and self.policy:
             self.target_cidr = self.policy.target_cidr or ip_range_to_target(self.policy.target_range)
+        if not self.target_cidr and self.target_range:
+            self.target_cidr = ip_range_to_target(self.target_range)
         if self.target_cidr:
             if "-" not in self.target_cidr:
                 self.target_cidr = normalize_cidr(self.target_cidr)

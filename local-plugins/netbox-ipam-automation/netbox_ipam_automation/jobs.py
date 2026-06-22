@@ -3,6 +3,7 @@ from __future__ import annotations
 from django.db import transaction
 from django.utils import timezone
 from core.exceptions import JobFailed
+from ipam.models import IPRange
 from netbox.jobs import JobRunner, system_job
 
 from .models import GlobalSettings, RangePolicy, ScanRun, ip_range_to_target
@@ -37,6 +38,18 @@ def get_policy_target(policy: RangePolicy | None) -> str:
     return policy.target_cidr or ip_range_to_target(policy.target_range)
 
 
+def get_scan_policy(scan_run: ScanRun) -> RangePolicy | None:
+    if scan_run.policy:
+        return scan_run.policy
+    if not scan_run.target_range:
+        return None
+    return RangePolicy(
+        target_range=scan_run.target_range,
+        scan_start=str(scan_run.target_range.start_address.ip),
+        scan_end=str(scan_run.target_range.end_address.ip),
+    )
+
+
 def get_policy_schedule(policy: RangePolicy, global_settings: GlobalSettings) -> tuple[str, int | None, str]:
     mode = global_settings.schedule_mode if policy.schedule_mode == RangePolicy.ScheduleModeChoices.INHERIT else policy.schedule_mode
     return (
@@ -60,8 +73,12 @@ def prepare_scan_run(
     scan_run.classification = ScanRun.ClassificationChoices.PENDING
     if scheduled_for is not None:
         scan_run.scheduled_for = scheduled_for
+    if not scan_run.target_range and scan_run.policy:
+        scan_run.target_range = scan_run.policy.target_range
     if not scan_run.target_cidr and scan_run.policy:
         scan_run.target_cidr = get_policy_target(scan_run.policy)
+    if not scan_run.target_cidr and scan_run.target_range:
+        scan_run.target_cidr = ip_range_to_target(scan_run.target_range)
     return scan_run
 
 
@@ -95,15 +112,25 @@ def create_due_scheduled_scan_runs(*, now=None) -> dict[str, int]:
     if available_slots == 0:
         return {"created": 0, "active": active_count}
 
-    policies = list(RangePolicy.objects.filter(enabled=True).order_by("pk"))
-    active_policy_ids = set(
-        ScanRun.objects.filter(
+    policies = list(RangePolicy.objects.filter(enabled=True).select_related("target_range").order_by("pk"))
+    active_keys = {
+        ("policy", policy_id)
+        for policy_id in ScanRun.objects.filter(
             status__in=ACTIVE_SCANRUN_STATUSES,
             policy_id__isnull=False,
         ).values_list("policy_id", flat=True)
+    }
+    active_keys.update(
+        ("range", range_id)
+        for range_id in ScanRun.objects.filter(
+            status__in=ACTIVE_SCANRUN_STATUSES,
+            policy_id__isnull=True,
+            target_range_id__isnull=False,
+        ).values_list("target_range_id", flat=True)
     )
 
     candidates = []
+    targets = []
     for policy in policies:
         if not policy.target_range_id:
             continue
@@ -118,7 +145,7 @@ def create_due_scheduled_scan_runs(*, now=None) -> dict[str, int]:
         schedule_mode, interval_minutes, cron_expressions = get_policy_schedule(policy, global_settings)
         candidates.append(
             {
-                "key": policy.pk,
+                "key": ("policy", policy.pk),
                 "enabled": policy.enabled,
                 "schedule_mode": schedule_mode,
                 "interval_minutes": interval_minutes,
@@ -128,31 +155,70 @@ def create_due_scheduled_scan_runs(*, now=None) -> dict[str, int]:
                 ),
             }
         )
+        targets.append({"key": ("policy", policy.pk), "policy": policy, "target_range": policy.target_range})
+
+    if global_settings.scan_all_active_ranges:
+        overridden_range_ids = RangePolicy.objects.filter(target_range_id__isnull=False).values_list(
+            "target_range_id", flat=True
+        )
+        for target_range in IPRange.objects.filter(status="active").exclude(pk__in=overridden_range_ids).order_by("pk"):
+            last_scan_run = (
+                ScanRun.objects.filter(
+                    policy__isnull=True,
+                    target_range=target_range,
+                    trigger=ScanRun.TriggerChoices.SCHEDULED,
+                )
+                .order_by("-scheduled_for", "-created")
+                .first()
+            )
+            key = ("range", target_range.pk)
+            candidates.append(
+                {
+                    "key": key,
+                    "enabled": True,
+                    "schedule_mode": RangePolicy.ScheduleModeChoices.INTERVAL,
+                    "interval_minutes": global_settings.default_scan_interval_minutes,
+                    "cron_expressions": "",
+                    "last_scheduled_for": (
+                        (last_scan_run.scheduled_for or last_scan_run.created) if last_scan_run else None
+                    ),
+                }
+            )
+            targets.append({"key": key, "policy": None, "target_range": target_range})
 
     due_candidates = select_due_candidates(
         candidates,
         now=now,
-        active_keys=active_policy_ids,
+        active_keys=active_keys,
         max_new_runs=available_slots,
     )
-    due_by_id = {candidate["key"]: candidate for candidate in due_candidates}
+    due_by_key = {candidate["key"]: candidate for candidate in due_candidates}
 
     created = 0
-    for policy in policies:
-        if policy.pk not in due_by_id:
+    for target in targets:
+        key = target["key"]
+        if key not in due_by_key:
             continue
 
-        scheduled_for = due_by_id[policy.pk]["scheduled_for"]
+        policy = target["policy"]
+        target_range = target["target_range"]
+        scheduled_for = due_by_key[key]["scheduled_for"]
         with transaction.atomic():
-            RangePolicy.objects.select_for_update().get(pk=policy.pk)
-            if ScanRun.objects.filter(
-                policy=policy,
+            if policy:
+                RangePolicy.objects.select_for_update().get(pk=policy.pk)
+            else:
+                IPRange.objects.select_for_update().get(pk=target_range.pk)
+            duplicate = ScanRun.objects.filter(
                 trigger=ScanRun.TriggerChoices.SCHEDULED,
                 scheduled_for=scheduled_for,
-            ).exists():
+            )
+            duplicate = duplicate.filter(policy=policy) if policy else duplicate.filter(
+                policy__isnull=True, target_range=target_range
+            )
+            if duplicate.exists():
                 continue
             scan_run = prepare_scan_run(
-                ScanRun(policy=policy),
+                ScanRun(policy=policy, target_range=target_range),
                 trigger=ScanRun.TriggerChoices.SCHEDULED,
                 scheduled_for=scheduled_for,
             )
@@ -184,27 +250,33 @@ def classify_scan_run(scan_run) -> str:
 
 
 def execute_scan_run(scan_run_id, *, job_id="manual", logger=None):
-    scan_run = ScanRun.objects.select_related("policy__target_range").get(pk=scan_run_id)
+    scan_run = ScanRun.objects.select_related("policy__target_range", "target_range").get(pk=scan_run_id)
     if scan_run.status in TERMINAL_SCANRUN_STATUSES:
         if logger:
             logger.info("Skipping terminal scan run %s", scan_run.pk)
         return scan_run
 
+    if not scan_run.target_range and scan_run.policy:
+        scan_run.target_range = scan_run.policy.target_range
     if not scan_run.target_cidr:
         scan_run.target_cidr = get_policy_target(scan_run.policy)
+    if not scan_run.target_cidr and scan_run.target_range:
+        scan_run.target_cidr = ip_range_to_target(scan_run.target_range)
     if not scan_run.target_cidr:
         scan_run.status = ScanRun.StatusChoices.FAILED
         scan_run.classification = ScanRun.ClassificationChoices.FAILED
         scan_run.finished_at = timezone.now()
         scan_run.message = "No policy target is configured for this scan run."
-        scan_run.save(update_fields=("target_cidr", "status", "classification", "finished_at", "message", "last_updated"))
+        scan_run.save(update_fields=("target_range", "target_cidr", "status", "classification", "finished_at", "message", "last_updated"))
         raise JobFailed(scan_run.message)
 
     if not scan_run.started_at:
         scan_run.started_at = timezone.now()
     scan_run.status = ScanRun.StatusChoices.RUNNING
     scan_run.message = "Executing TCP scan."
-    scan_run.save(update_fields=("started_at", "status", "message", "last_updated"))
+    scan_run.save(
+        update_fields=("target_range", "target_cidr", "started_at", "status", "message", "last_updated")
+    )
 
     global_settings = get_global_settings()
     request_payload = schedule_scan_run(scan_run)
@@ -212,9 +284,10 @@ def execute_scan_run(scan_run_id, *, job_id="manual", logger=None):
         logger.info("Using TCP adapter for scan run %s", scan_run.pk)
 
     try:
-        scan_result = scan_range(scan_run.policy, global_settings=global_settings)
+        scan_policy = get_scan_policy(scan_run)
+        scan_result = scan_range(scan_policy, global_settings=global_settings)
         observation_summary = apply_scan_observations(
-            scan_run.policy,
+            scan_policy,
             scan_result["responsive_hosts"],
             global_settings=global_settings,
             hostnames=scan_result["hostnames"],

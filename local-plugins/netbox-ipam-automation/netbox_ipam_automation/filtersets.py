@@ -12,6 +12,7 @@ class GlobalSettingsFilterSet(NetBoxModelFilterSet):
         fields = (
             "name",
             "enabled",
+            "scan_all_active_ranges",
             "schedule_mode",
             "default_scan_interval_minutes",
             "deprecated_last_seen_days",
@@ -46,7 +47,7 @@ class RangePolicyFilterSet(NetBoxModelFilterSet):
 class ScanRunFilterSet(NetBoxModelFilterSet):
     class Meta:
         model = ScanRun
-        fields = ("policy", "status", "trigger", "classification", "target_cidr")
+        fields = ("policy", "target_range", "status", "trigger", "classification", "target_cidr")
 
     def search(self, queryset, name, value):
         if not value:
@@ -55,4 +56,5 @@ class ScanRunFilterSet(NetBoxModelFilterSet):
             Q(target_cidr__icontains=value)
             | Q(message__icontains=value)
             | Q(policy__name__icontains=value)
+            | Q(target_range__description__icontains=value)
         )

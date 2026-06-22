@@ -20,6 +20,7 @@ from .tables import GlobalSettingsTable, RangePolicyTable, ScanRunTable
 class GlobalSettingsPanel(ObjectAttributesPanel):
     name = attrs.TextAttr("name", label="Name")
     enabled = attrs.BooleanAttr("enabled", label="Enabled")
+    scan_all_active_ranges = attrs.BooleanAttr("scan_all_active_ranges", label="Scan all active IP ranges")
     schedule_mode = attrs.ChoiceAttr("schedule_mode", label="Schedule mode")
     default_scan_interval_minutes = attrs.NumericAttr("default_scan_interval_minutes", label="Default scan interval")
     default_cron_expressions = attrs.TextAttr("default_cron_expressions", label="Default cron expressions")
@@ -49,6 +50,7 @@ class RangePolicyPanel(ObjectAttributesPanel):
 
 class ScanRunPanel(ObjectAttributesPanel):
     policy = attrs.RelatedObjectAttr("policy", label="Policy", linkify=True)
+    target_range = attrs.RelatedObjectAttr("target_range", label="Target IP range", linkify=True)
     requested_by = attrs.RelatedObjectAttr("requested_by", label="Requested by", linkify=True)
     status = attrs.ChoiceAttr("status", label="Status")
     trigger = attrs.ChoiceAttr("trigger", label="Trigger")

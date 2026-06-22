@@ -18,6 +18,7 @@ class GlobalSettingsTable(NetBoxTable):
             "pk",
             "name",
             "enabled",
+            "scan_all_active_ranges",
             "schedule_mode",
             "default_scan_interval_minutes",
             "default_cron_expressions",
@@ -32,6 +33,7 @@ class GlobalSettingsTable(NetBoxTable):
         default_columns = (
             "name",
             "enabled",
+            "scan_all_active_ranges",
             "default_scan_interval_minutes",
             "max_concurrent_scans",
             "deprecated_last_seen_days",
@@ -65,7 +67,7 @@ class RangePolicyTable(NetBoxTable):
 
 class ScanRunTable(NetBoxTable):
     id = tables.Column(linkify=True, verbose_name="Task ID")
-    policy = tables.Column(linkify=True, verbose_name="Task")
+    policy = tables.Column(empty_values=(), orderable=False, verbose_name="Task")
     status = columns.ChoiceFieldColumn()
     duration = tables.Column(empty_values=(), orderable=False)
 
@@ -75,12 +77,17 @@ class ScanRunTable(NetBoxTable):
         end = record.finished_at or record.last_updated
         return timesince(record.started_at, end)
 
+    def render_policy(self, record):
+        target = record.policy or record.target_range
+        return target if target else "—"
+
     class Meta(NetBoxTable.Meta):
         model = ScanRun
         fields = (
             "pk",
             "id",
             "policy",
+            "target_range",
             "status",
             "requested_by",
             "trigger",

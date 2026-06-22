@@ -163,6 +163,54 @@ class SchedulingTest(TestCase):
             GlobalSettings(deprecated_last_seen_days=2, deprecated_grace_period_days=0).full_clean()
 
     @patch("netbox_ipam_automation.jobs.enqueue_scan_run")
+    def test_global_default_schedules_active_ranges_without_policies(self, enqueue_scan_run):
+        active_range = IPRange(
+            start_address="192.0.2.0/30",
+            end_address="192.0.2.3/30",
+            status="active",
+        )
+        active_range.full_clean()
+        active_range.save()
+        reserved_range = IPRange(
+            start_address="192.0.2.4/30",
+            end_address="192.0.2.7/30",
+            status="reserved",
+        )
+        reserved_range.full_clean()
+        reserved_range.save()
+        GlobalSettings.objects.create(
+            scan_all_active_ranges=True,
+            default_scan_interval_minutes=60,
+            max_concurrent_scans=10,
+        )
+
+        self.assertEqual(create_due_scheduled_scan_runs(now=datetime(2026, 1, 1, tzinfo=timezone.utc))["created"], 1)
+        scan_run = ScanRun.objects.get()
+        self.assertIsNone(scan_run.policy)
+        self.assertEqual(scan_run.target_range, active_range)
+        self.assertEqual(scan_run.target_cidr, "192.0.2.0-192.0.2.3")
+        enqueue_scan_run.assert_called_once_with(scan_run)
+
+    @patch("netbox_ipam_automation.jobs.enqueue_scan_run")
+    def test_global_default_is_opt_in_and_policy_can_disable_a_range(self, enqueue_scan_run):
+        target_range = IPRange(
+            start_address="192.0.2.0/30",
+            end_address="192.0.2.3/30",
+            status="active",
+        )
+        target_range.full_clean()
+        target_range.save()
+        settings = GlobalSettings.objects.create(max_concurrent_scans=10)
+
+        self.assertEqual(create_due_scheduled_scan_runs()["created"], 0)
+
+        settings.scan_all_active_ranges = True
+        settings.save()
+        RangePolicy.objects.create(name="Do not scan", target_range=target_range, enabled=False)
+        self.assertEqual(create_due_scheduled_scan_runs()["created"], 0)
+        enqueue_scan_run.assert_not_called()
+
+    @patch("netbox_ipam_automation.jobs.enqueue_scan_run")
     def test_scheduler_does_not_create_duplicate_cron_runs(self, enqueue_scan_run):
         ip_range = IPRange(
             start_address="203.0.113.0/30",
@@ -368,3 +416,29 @@ class ScannerAdapterTest(TestCase):
         self.assertEqual(managed.dns_name, "managed.example")
         self.assertEqual(protected.status, "reserved")
         self.assertEqual(protected.dns_name, "")
+
+    @patch("netbox_ipam_automation.jobs.scan_range")
+    def test_execute_scan_run_without_explicit_policy(self, scan_range_mock):
+        GlobalSettings.objects.create(reverse_dns_enabled=False)
+        managed = IPAddress.objects.create(address="203.0.113.1/30", status="free")
+        scan_run = ScanRun.objects.create(target_range=self.ip_range)
+        scan_range_mock.return_value = {
+            "scanned_hosts": 4,
+            "responsive_hosts": ["203.0.113.1"],
+            "open_ports": {"203.0.113.1": [443]},
+            "hostnames": {},
+            "errors": [],
+            "ports": [22, 80, 443, 3389],
+            "timeout_seconds": 1,
+            "worker_count": 4,
+        }
+
+        execute_scan_run(scan_run.pk, job_id="implicit-test")
+        scan_run.refresh_from_db()
+        managed.refresh_from_db()
+
+        implicit_policy = scan_range_mock.call_args.args[0]
+        self.assertEqual(implicit_policy.target_range, self.ip_range)
+        self.assertEqual((implicit_policy.scan_start, implicit_policy.scan_end), ("203.0.113.0", "203.0.113.3"))
+        self.assertEqual(scan_run.target_cidr, "203.0.113.0-203.0.113.3")
+        self.assertEqual(managed.status, "active")
