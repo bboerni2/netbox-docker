@@ -746,7 +746,11 @@ class PermissionGateTest(TestCase):
         detail_response = self.client.get(policy.get_absolute_url())
         self.assertContains(detail_response, "Run scan")
 
-        response = self.client.post(reverse("plugins:netbox_ipam_automation:rangepolicy_run_scan", args=[policy.pk]))
+        url = reverse("plugins:netbox_ipam_automation:rangepolicy_run_scan", args=[policy.pk])
+        confirm_response = self.client.get(url)
+        self.assertContains(confirm_response, "csrfmiddlewaretoken")
+
+        response = self.client.post(url)
 
         scan_run = ScanRun.objects.get(policy=policy)
         self.assertEqual(response.status_code, 302)

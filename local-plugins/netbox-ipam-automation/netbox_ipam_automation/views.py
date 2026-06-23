@@ -196,6 +196,13 @@ class RangePolicyRunScanView(PermissionRequiredMixin, View):
         self.object = get_object_or_404(RangePolicy.objects.select_related("target_range"), pk=pk)
         return super().dispatch(request, pk, *args, **kwargs)
 
+    def get(self, request, *args, **kwargs):
+        return render(
+            request,
+            "netbox_ipam_automation/rangepolicy_run_scan.html",
+            {"object": self.object},
+        )
+
     def post(self, request, *args, **kwargs):
         scan_run = submit_manual_scan_run(ScanRun(policy=self.object), requested_by=request.user)
         messages.success(request, f"Started scan run {scan_run.pk}.")

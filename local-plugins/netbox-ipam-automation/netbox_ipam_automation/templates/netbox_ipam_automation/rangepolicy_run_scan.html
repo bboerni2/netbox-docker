@@ -1,0 +1,23 @@
+{% extends 'generic/_base.html' %}
+
+{% block content %}
+  <div class="row mt-5">
+    <div class="col col-md-6 offset-md-3">
+      <form action="" method="post" class="form">
+        {% csrf_token %}
+        <div class="card">
+          <h2 class="card-header">Run scan</h2>
+          <div class="card-body">
+            <p>Start a manual scan for {{ object }}?</p>
+          </div>
+          <div class="card-footer text-end">
+            <a href="{{ object.get_absolute_url }}" class="btn btn-outline-secondary">Cancel</a>
+            <button type="submit" name="_confirm" class="btn btn-success">
+              <i class="mdi mdi-play" aria-hidden="true"></i> Run scan
+            </button>
+          </div>
+        </div>
+      </form>
+    </div>
+  </div>
+{% endblock %}

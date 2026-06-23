@@ -1,8 +1,5 @@
 {% if url and can_run %}
-  <form action="{{ url }}{% if url_params %}?{{ url_params }}{% endif %}" method="post" class="d-inline">
-    {% csrf_token %}
-    <button type="submit" class="btn btn-success">
-      <i class="mdi mdi-play" aria-hidden="true"></i> {{ label }}
-    </button>
-  </form>
+  <a href="{{ url }}{% if url_params %}?{{ url_params }}{% endif %}" class="btn btn-success">
+    <i class="mdi mdi-play" aria-hidden="true"></i> {{ label }}
+  </a>
 {% endif %}
