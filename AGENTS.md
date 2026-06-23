@@ -16,7 +16,7 @@
   - `upstream`: `https://github.com/netbox-community/netbox-docker.git`
   - `forgejo`: `http://localhost:3000/bhauser/netbox-docker-dev-test.git`
 - Active dev branch verified 2026-06-23: `codex/sync-safe-netbox-platform`.
-- Initial sync-safe bootstrap: `2f26109`; latest verified plugin commit: `80ea66a`.
+- Initial sync-safe bootstrap: `2f26109`. Use `git log -1` for the current verified head; do not persist a moving commit as project truth.
 - Default publication target is `origin/codex/sync-safe-netbox-platform`. Do not push to `upstream` or `forgejo` unless requested.
 - WSL Git may lack GitHub credentials. The tested fallback uses Windows Git Credential Manager:
 
@@ -109,6 +109,9 @@ docker compose \
 - Any RangePolicy for an IPRange overrides implicit scanning. A disabled policy explicitly excludes that range; enabled policies use Global default, Interval, or Cron as configured.
 - Only active IPRanges are enrolled implicitly. Explicit policies may target other IPRange statuses.
 - Scheduler prevents duplicate runs for the same policy/range and respects `max_concurrent_scans`.
+- Before counting concurrency, the scheduler marks orphaned `queued`/`running` ScanRuns as `failed` when their Core/RQ job is terminal or missing beyond `RQ_DEFAULT_TIMEOUT`.
+- At worker startup, the plugin repairs only its own periodic scheduler entry when NetBox still says `scheduled` but the RQ job is missing or failed. It must not clean unrelated NetBox jobs.
+- With `max_concurrent_scans=1`, due explicit policies run first and implicit ranges then proceed one at a time; do not expect every active range to appear immediately.
 - ScanRun history stores target range, task state, counters, summary, errors, hostnames, and open ports in native NetBox views.
 
 Last observed mutable settings on 2026-06-23 (verify before acting): scheduler enabled, scan-all-active enabled, interval 55 minutes, deprecation 2/14 days, TCP defaults `22,80,443,3389`, reverse DNS enabled.

@@ -1,12 +1,20 @@
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
+from uuid import uuid4
 
+from core.models import Job
 from django.core.exceptions import ValidationError
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from ipam.models import IPAddress, IPRange
 
 from netbox_ipam_automation.forms import GlobalSettingsForm, RangePolicyForm
-from netbox_ipam_automation.jobs import create_due_scheduled_scan_runs, execute_scan_run
+from netbox_ipam_automation.jobs import (
+    ExecuteScanRunJob,
+    ScheduleScanRunsJob,
+    create_due_scheduled_scan_runs,
+    execute_scan_run,
+    reconcile_stale_scan_runs,
+)
 from netbox_ipam_automation.models import GlobalSettings, RangePolicy, ScanRun
 from netbox_ipam_automation.services import (
     apply_scan_observations,
@@ -233,6 +241,104 @@ class SchedulingTest(TestCase):
         self.assertEqual(create_due_scheduled_scan_runs(now=now)["created"], 0)
         self.assertEqual(ScanRun.objects.filter(policy=policy).count(), 1)
         enqueue_scan_run.assert_called_once()
+
+
+class SchedulerRecoveryTest(TestCase):
+    def _scan_run(self):
+        return ScanRun.objects.create(status=ScanRun.StatusChoices.QUEUED)
+
+    def _job(self, scan_run=None, *, status="running", name="Execute IPAM scan run", error=""):
+        return Job.objects.create(
+            object=scan_run,
+            name=name,
+            status=status,
+            error=error,
+            interval=1 if scan_run is None else None,
+            job_id=uuid4(),
+            queue_name="default",
+        )
+
+    @override_settings(RQ_DEFAULT_TIMEOUT=300)
+    def test_orphaned_scan_run_without_job_is_failed_after_timeout(self):
+        now = datetime(2027, 1, 1, tzinfo=timezone.utc)
+        scan_run = self._scan_run()
+        ScanRun.objects.filter(pk=scan_run.pk).update(last_updated=now - timedelta(minutes=6))
+
+        self.assertEqual(reconcile_stale_scan_runs(now=now), 1)
+        scan_run.refresh_from_db()
+        self.assertEqual(scan_run.status, ScanRun.StatusChoices.FAILED)
+        self.assertEqual(scan_run.classification, ScanRun.ClassificationChoices.FAILED)
+        self.assertEqual(scan_run.error_count, 1)
+        self.assertEqual(scan_run.finished_at, now)
+        self.assertEqual(scan_run.summary["errors"][0]["error"], "OrphanedScanRun")
+
+    def test_terminal_execution_job_is_failed_but_active_rq_job_is_preserved(self):
+        now = datetime(2027, 1, 1, tzinfo=timezone.utc)
+        failed_scan = self._scan_run()
+        active_scan = self._scan_run()
+        self._job(failed_scan, status="errored", error="worker error")
+        self._job(active_scan, status="running")
+        ScanRun.objects.filter(pk=active_scan.pk).update(last_updated=now - timedelta(hours=1))
+
+        with patch("netbox_ipam_automation.jobs.rq_job_is_active", return_value=True):
+            self.assertEqual(reconcile_stale_scan_runs(now=now), 1)
+
+        failed_scan.refresh_from_db()
+        active_scan.refresh_from_db()
+        self.assertEqual(failed_scan.status, ScanRun.StatusChoices.FAILED)
+        self.assertEqual(active_scan.status, ScanRun.StatusChoices.QUEUED)
+
+    @patch("netbox_ipam_automation.jobs.enqueue_scan_run")
+    def test_recovery_frees_capacity_for_implicit_scan(self, enqueue_scan_run):
+        now = datetime(2027, 1, 1, tzinfo=timezone.utc)
+        stale_scan = self._scan_run()
+        ScanRun.objects.filter(pk=stale_scan.pk).update(last_updated=now - timedelta(hours=1))
+        target_range = IPRange(
+            start_address="192.0.2.0/30",
+            end_address="192.0.2.3/30",
+            status="active",
+        )
+        target_range.full_clean()
+        target_range.save()
+        GlobalSettings.objects.create(scan_all_active_ranges=True, max_concurrent_scans=1)
+
+        result = create_due_scheduled_scan_runs(now=now)
+
+        stale_scan.refresh_from_db()
+        self.assertEqual(stale_scan.status, ScanRun.StatusChoices.FAILED)
+        self.assertEqual(result, {"created": 1, "active": 0})
+        enqueue_scan_run.assert_called_once()
+
+    def test_system_job_replaces_stale_rq_entry_without_duplicating_healthy_schedule(self):
+        stale_job = self._job(name=ScheduleScanRunsJob.name, status="scheduled")
+        with (
+            patch("netbox_ipam_automation.jobs.rq_job_is_active", return_value=False),
+            patch.object(ScheduleScanRunsJob, "enqueue", return_value="replacement") as enqueue,
+        ):
+            self.assertEqual(ScheduleScanRunsJob.enqueue_once(interval=1), "replacement")
+            enqueue.assert_called_once()
+        stale_job.refresh_from_db()
+        self.assertEqual(stale_job.status, "errored")
+
+        healthy_job = self._job(name=ScheduleScanRunsJob.name, status="scheduled")
+        with (
+            patch("netbox_ipam_automation.jobs.rq_job_is_active", return_value=True),
+            patch.object(ScheduleScanRunsJob, "enqueue") as enqueue,
+        ):
+            self.assertEqual(ScheduleScanRunsJob.enqueue_once(interval=1), healthy_job)
+            enqueue.assert_not_called()
+
+    def test_unexpected_execute_error_fails_scan_run_and_core_job(self):
+        scan_run = self._scan_run()
+        core_job = self._job(scan_run, status="pending")
+
+        with patch("netbox_ipam_automation.jobs.execute_scan_run", side_effect=RuntimeError("unexpected")):
+            ExecuteScanRunJob.handle(core_job)
+
+        scan_run.refresh_from_db()
+        core_job.refresh_from_db()
+        self.assertEqual(scan_run.status, ScanRun.StatusChoices.FAILED)
+        self.assertEqual(core_job.status, "errored")
 
 
 class ScanStatusPolicyTest(TestCase):

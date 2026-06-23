@@ -1,7 +1,12 @@
 from __future__ import annotations
 
+from datetime import timedelta
+
+import django_rq
+from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
+from core.choices import JobStatusChoices
 from core.exceptions import JobFailed
 from ipam.models import IPRange
 from netbox.jobs import JobRunner, system_job
@@ -26,10 +31,70 @@ TERMINAL_SCANRUN_STATUSES = (
     ScanRun.StatusChoices.FAILED,
     ScanRun.StatusChoices.CANCELLED,
 )
+ACTIVE_RQ_STATUSES = {"queued", "started", "deferred", "scheduled"}
 
 
 def get_global_settings() -> GlobalSettings:
     return GlobalSettings.objects.order_by("pk").first() or GlobalSettings()
+
+
+def rq_job_is_active(job) -> bool:
+    try:
+        rq_job = django_rq.get_queue(job.queue_name or "default").fetch_job(str(job.job_id))
+        status = rq_job.get_status(refresh=True) if rq_job else None
+        return getattr(status, "value", status) in ACTIVE_RQ_STATUSES
+    except Exception:
+        # Redis trouble must not cause healthy jobs to be declared failed.
+        return True
+
+
+def fail_scan_run(scan_run: ScanRun, message: str, *, error_type="OrphanedScanRun", now=None) -> bool:
+    if scan_run.status in TERMINAL_SCANRUN_STATUSES:
+        return False
+    now = now or timezone.now()
+    errors = (scan_run.summary or {}).get("errors", [])
+    if not isinstance(errors, list):
+        errors = []
+    scan_run.summary = {
+        **(scan_run.summary or {}),
+        "accepted": False,
+        "errors": [*errors, {"error": error_type, "message": message}][-50:],
+    }
+    scan_run.status = ScanRun.StatusChoices.FAILED
+    scan_run.classification = ScanRun.ClassificationChoices.FAILED
+    scan_run.error_count = max(scan_run.error_count, 1)
+    scan_run.finished_at = now
+    scan_run.message = message[:255]
+    scan_run.save(
+        update_fields=(
+            "summary",
+            "status",
+            "classification",
+            "error_count",
+            "finished_at",
+            "message",
+            "last_updated",
+        )
+    )
+    return True
+
+
+def reconcile_stale_scan_runs(*, now=None) -> int:
+    now = now or timezone.now()
+    cutoff = now - timedelta(seconds=getattr(settings, "RQ_DEFAULT_TIMEOUT", 300))
+    reconciled = 0
+    for scan_run in ScanRun.objects.filter(status__in=ACTIVE_SCANRUN_STATUSES).prefetch_related("jobs"):
+        latest_job = max(scan_run.jobs.all(), key=lambda job: job.created, default=None)
+        if latest_job and latest_job.status in JobStatusChoices.TERMINAL_STATE_CHOICES:
+            detail = latest_job.error or f"Execution job ended with status {latest_job.status}."
+        elif latest_job and scan_run.last_updated <= cutoff and not rq_job_is_active(latest_job):
+            detail = "Execution job is no longer active in RQ."
+        elif latest_job is None and scan_run.last_updated <= cutoff:
+            detail = "No execution job exists for this queued scan run."
+        else:
+            continue
+        reconciled += fail_scan_run(scan_run, detail, now=now)
+    return reconciled
 
 
 def get_policy_target(policy: RangePolicy | None) -> str:
@@ -104,6 +169,7 @@ def submit_manual_scan_run(scan_run: ScanRun, *, requested_by=None) -> ScanRun:
 def create_due_scheduled_scan_runs(*, now=None) -> dict[str, int]:
     now = now or timezone.now()
     global_settings = get_global_settings()
+    reconcile_stale_scan_runs(now=now)
     if not global_settings.enabled:
         return {"created": 0, "active": 0}
 
@@ -378,7 +444,16 @@ class ExecuteScanRunJob(JobRunner):
         scan_run = self.job.object
         if scan_run is None:
             raise JobFailed("Scan execution job is missing its ScanRun instance.")
-        execute_scan_run(scan_run.pk, job_id=self.job.job_id, logger=self.logger)
+        try:
+            execute_scan_run(scan_run.pk, job_id=self.job.job_id, logger=self.logger)
+        except Exception as exc:
+            scan_run.refresh_from_db()
+            fail_scan_run(
+                scan_run,
+                f"Scan execution failed: {exc}",
+                error_type=type(exc).__name__,
+            )
+            raise
 
 
 @system_job(interval=1)
@@ -386,6 +461,17 @@ class ScheduleScanRunsJob(JobRunner):
     class Meta:
         name = "Schedule IPAM scan runs"
 
+    @classmethod
+    def enqueue_once(cls, *args, **kwargs):
+        stale_jobs = cls.get_jobs().filter(status__in=JobStatusChoices.ENQUEUED_STATE_CHOICES)
+        for job in stale_jobs:
+            if not rq_job_is_active(job):
+                job.terminate(
+                    status=JobStatusChoices.STATUS_ERRORED,
+                    error="Periodic scheduler job is no longer active in RQ.",
+                )
+        return super().enqueue_once(*args, **kwargs)
+
     def run(self, *args, **kwargs):
         result = create_due_scheduled_scan_runs()
-        self.logger.info("Created %s scheduled scan runs", result["created"])
+        self.logger.info(f"Created {result['created']} scheduled scan runs")
