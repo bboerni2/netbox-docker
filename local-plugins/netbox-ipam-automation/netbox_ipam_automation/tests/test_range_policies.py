@@ -553,7 +553,7 @@ class ScannerAdapterTest(TestCase):
             {
                 "returncode": 0,
                 "stdout": '<nmaprun><host><status state="up"/><address addr="203.0.113.1" addrtype="ipv4"/></host></nmaprun>',
-                "stderr": "",
+                "stderr": "Warning:  You are not root -- using TCP pingscan rather than ICMP\n",
             },
         )()
 
@@ -565,7 +565,37 @@ class ScannerAdapterTest(TestCase):
 
         self.assertEqual(result["adapter"], "nmap")
         self.assertEqual(result["discovery_mode"], "routed")
+        self.assertEqual(result["scanned_hosts"], 4)
+        self.assertEqual(result["nmap_reported_hosts"], 1)
         self.assertEqual(result["responsive_hosts"], ["203.0.113.1"])
+        self.assertEqual(result["warnings"], ["Warning:  You are not root -- using TCP pingscan rather than ICMP"])
+
+    @patch("netbox_ipam_automation.jobs.scan_range")
+    def test_execute_scan_run_classifies_no_responses_as_quiet(self, scan_range_mock):
+        GlobalSettings.objects.create()
+        scan_run = ScanRun.objects.create(policy=self.policy)
+        scan_range_mock.return_value = {
+            "adapter": "nmap",
+            "discovery_mode": "routed",
+            "command": ["nmap"],
+            "scanned_hosts": 4,
+            "nmap_reported_hosts": 0,
+            "responsive_hosts": [],
+            "results": [],
+            "hostnames": {},
+            "errors": [],
+            "warnings": [],
+            "mac_addresses": {},
+        }
+
+        execute_scan_run(scan_run.pk, job_id="quiet-test")
+        scan_run.refresh_from_db()
+
+        self.assertEqual(scan_run.status, ScanRun.StatusChoices.COMPLETED)
+        self.assertEqual(scan_run.classification, ScanRun.ClassificationChoices.QUIET)
+        self.assertEqual(scan_run.observed_hosts, 4)
+        self.assertEqual(scan_run.responsive_hosts, 0)
+        self.assertEqual(scan_run.summary["observed_hosts"], 4)
 
     def test_scan_range_rejects_nmap_failure(self):
         completed = type("Completed", (), {"returncode": 1, "stdout": "", "stderr": "permission denied"})()
@@ -587,6 +617,7 @@ class ScannerAdapterTest(TestCase):
             "discovery_mode": "routed",
             "command": ["nmap"],
             "scanned_hosts": 4,
+            "nmap_reported_hosts": 2,
             "responsive_hosts": ["203.0.113.1", "203.0.113.2"],
             "results": [
                 {"ip": "203.0.113.1", "is_active": True, "hostname": "managed.example", "mac_address": None},
@@ -594,6 +625,7 @@ class ScannerAdapterTest(TestCase):
             ],
             "hostnames": {"203.0.113.1": "managed.example", "203.0.113.2": "protected.example"},
             "errors": [{"host": "203.0.113.3", "port": 22, "error": "TimeoutError"}],
+            "warnings": ["Warning: non-root fallback"],
             "mac_addresses": {},
         }
 
@@ -603,12 +635,14 @@ class ScannerAdapterTest(TestCase):
         protected.refresh_from_db()
 
         self.assertEqual(scan_run.status, ScanRun.StatusChoices.COMPLETED)
-        self.assertEqual(scan_run.observed_hosts, 2)
+        self.assertEqual(scan_run.observed_hosts, 4)
         self.assertEqual(scan_run.responsive_hosts, 2)
         self.assertEqual(scan_run.error_count, 0)
         self.assertEqual(scan_run.summary["job_id"], "test-job")
+        self.assertEqual(scan_run.summary["observed_hosts"], 4)
         self.assertEqual(scan_run.summary["updated"], 1)
         self.assertEqual(scan_run.summary["skipped_protected"], 1)
+        self.assertEqual(scan_run.summary["warnings"], ["Warning: non-root fallback"])
         self.assertEqual(scan_run.summary["responsive_hosts"], ["203.0.113.1", "203.0.113.2"])
         self.assertEqual(managed.status, "active")
         self.assertEqual(managed.dns_name, "managed.example")
@@ -625,10 +659,12 @@ class ScannerAdapterTest(TestCase):
             "discovery_mode": "routed",
             "command": ["nmap"],
             "scanned_hosts": 4,
+            "nmap_reported_hosts": 1,
             "responsive_hosts": ["203.0.113.1"],
             "results": [{"ip": "203.0.113.1", "is_active": True, "hostname": None, "mac_address": None}],
             "hostnames": {},
             "errors": [],
+            "warnings": [],
             "mac_addresses": {},
         }
 
@@ -652,6 +688,7 @@ class ScannerAdapterTest(TestCase):
             "discovery_mode": "routed",
             "command": ["nmap"],
             "scanned_hosts": 4,
+            "nmap_reported_hosts": 2,
             "responsive_hosts": ["203.0.113.1", "203.0.113.2"],
             "results": [
                 {"ip": "203.0.113.1", "is_active": True, "hostname": "managed.example", "mac_address": None},
@@ -659,6 +696,7 @@ class ScannerAdapterTest(TestCase):
             ],
             "hostnames": {"203.0.113.1": "managed.example"},
             "errors": [],
+            "warnings": [],
             "mac_addresses": {},
         }
 

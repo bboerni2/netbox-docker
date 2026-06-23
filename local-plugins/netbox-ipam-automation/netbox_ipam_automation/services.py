@@ -361,6 +361,12 @@ def iter_policy_scan_hosts(policy):
         current += 1
 
 
+def count_policy_scan_hosts(policy) -> int:
+    start = ip_address(str(policy.scan_start).split("/", 1)[0])
+    end = ip_address(str(policy.scan_end).split("/", 1)[0])
+    return int(end) - int(start) + 1
+
+
 def reverse_dns(host: str) -> str | None:
     try:
         return socket.gethostbyaddr(host)[0]
@@ -456,11 +462,13 @@ def parse_nmap_xml(xml_text: str) -> list[dict[str, object]]:
 
 def scan_range(policy, *, global_settings) -> dict[str, object]:
     command, mode, targets = build_nmap_command(policy, global_settings)
+    target_count = count_policy_scan_hosts(policy)
     completed = subprocess.run(command, capture_output=True, text=True, check=False)
     if completed.returncode != 0:
         message = (completed.stderr or completed.stdout or "nmap failed").strip()
         raise DiscoveryError(message[:500])
 
+    warnings = [line.strip() for line in completed.stderr.splitlines() if line.strip()]
     results = parse_nmap_xml(completed.stdout)
     responsive_hosts = sorted(
         [result["ip"] for result in results if result.get("is_active")],
@@ -483,7 +491,8 @@ def scan_range(policy, *, global_settings) -> dict[str, object]:
         "command": command,
         "targets": targets,
         "results": results,
-        "scanned_hosts": len(results),
+        "scanned_hosts": target_count,
+        "nmap_reported_hosts": len(results),
         "responsive_hosts": responsive_hosts,
         "hostnames": hostnames,
         "mac_addresses": {
@@ -492,6 +501,7 @@ def scan_range(policy, *, global_settings) -> dict[str, object]:
             if result.get("is_active") and result.get("mac_address")
         },
         "errors": [],
+        "warnings": warnings[:SCAN_ERROR_LIMIT],
     }
 
 

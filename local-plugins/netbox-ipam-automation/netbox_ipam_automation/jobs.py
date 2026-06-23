@@ -420,6 +420,7 @@ def execute_scan_run(scan_run_id, *, job_id="manual", logger=None):
         )
         raise JobFailed(scan_run.message) from exc
 
+    observed_hosts = max(observation_summary["observed_hosts"], scan_result["scanned_hosts"])
     scan_run.summary = {
         **(scan_run.summary or {}),
         "adapter": "nmap",
@@ -430,8 +431,9 @@ def execute_scan_run(scan_run_id, *, job_id="manual", logger=None):
         "target_cidr": request_payload["target_cidr"],
         "discovery_mode": scan_result["discovery_mode"],
         "command": scan_result["command"],
-        "observed_hosts": observation_summary["observed_hosts"],
+        "observed_hosts": observed_hosts,
         "scanned_hosts": scan_result["scanned_hosts"],
+        "nmap_reported_hosts": scan_result["nmap_reported_hosts"],
         "responsive_hosts": scan_result["responsive_hosts"],
         "updated": observation_summary["updated"],
         "created": observation_summary["created"],
@@ -440,12 +442,12 @@ def execute_scan_run(scan_run_id, *, job_id="manual", logger=None):
         "planned_deprecations": observation_summary["planned_deprecations"],
         "planned_frees": observation_summary["planned_frees"],
         "skipped_protected": observation_summary["skipped_protected"],
-        "warnings": observation_summary["warnings"],
+        "warnings": [*scan_result.get("warnings", []), *observation_summary["warnings"]],
         "errors": scan_result["errors"],
         "hostnames": scan_result["hostnames"],
         "mac_addresses": scan_result["mac_addresses"],
     }
-    scan_run.observed_hosts = observation_summary["observed_hosts"]
+    scan_run.observed_hosts = observed_hosts
     scan_run.responsive_hosts = observation_summary["responsive_hosts"]
     scan_run.error_count = 0
     scan_run.classification = classify_scan_run(scan_run)
