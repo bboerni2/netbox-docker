@@ -49,6 +49,7 @@ class GlobalSettingsForm(IntervalFieldsMixin, NetBoxModelForm):
             InlineFields("interval_value", "interval_unit", label="Default scan interval"),
             "default_cron_expressions",
             "max_concurrent_scans",
+            "max_tasks_per_template",
             "deprecated_last_seen_days",
             "deprecated_grace_period_days",
             "default_tcp_ports",
@@ -68,6 +69,7 @@ class GlobalSettingsForm(IntervalFieldsMixin, NetBoxModelForm):
             "default_scan_interval_minutes",
             "default_cron_expressions",
             "max_concurrent_scans",
+            "max_tasks_per_template",
             "deprecated_last_seen_days",
             "deprecated_grace_period_days",
             "default_tcp_ports",
@@ -83,6 +85,10 @@ class GlobalSettingsForm(IntervalFieldsMixin, NetBoxModelForm):
         self.fields["scan_all_active_ranges"].label = "Scan all active IP ranges"
         self.fields["scan_all_active_ranges"].help_text = (
             "Automatically scan active IP ranges without a range policy using the default scan interval."
+        )
+        self.fields["max_tasks_per_template"].label = "Max tasks per template"
+        self.fields["max_tasks_per_template"].help_text = (
+            "Maximum terminal scan runs retained per IP range. Active runs do not count."
         )
         self.fields["deprecated_last_seen_days"].label = "Deprecated last seen"
         self.fields["deprecated_last_seen_days"].help_text = (

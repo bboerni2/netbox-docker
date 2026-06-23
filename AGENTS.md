@@ -112,9 +112,11 @@ docker compose \
 - Before counting concurrency, the scheduler marks orphaned `queued`/`running` ScanRuns as `failed` when their Core/RQ job is terminal or missing beyond `RQ_DEFAULT_TIMEOUT`.
 - At worker startup, the plugin repairs only its own periodic scheduler entry when NetBox still says `scheduled` but the RQ job is missing or failed. It must not clean unrelated NetBox jobs.
 - With `max_concurrent_scans=1`, due explicit policies run first and implicit ranges then proceed one at a time; do not expect every active range to appear immediately.
+- `max_tasks_per_template` retains the newest terminal ScanRuns per effective IPRange/NetID (default 100). Explicit and implicit runs share the limit; active runs are never pruned.
+- Retention runs in the existing minutely scheduler even when scan scheduling is disabled. Pruning a ScanRun also removes its related Core Job/logs; PostgreSQL task IDs remain monotonic.
 - ScanRun history stores target range, task state, counters, summary, errors, hostnames, and open ports in native NetBox views.
 
-Last observed mutable settings on 2026-06-23 (verify before acting): scheduler enabled, scan-all-active enabled, interval 55 minutes, deprecation 2/14 days, TCP defaults `22,80,443,3389`, reverse DNS enabled.
+Last observed mutable settings on 2026-06-23 (verify before acting): scheduler enabled, scan-all-active enabled, interval 55 minutes, retention 100 tasks per NetID, deprecation 2/14 days, TCP defaults `22,80,443,3389`, reverse DNS enabled.
 
 ## NetBox status and import traps
 

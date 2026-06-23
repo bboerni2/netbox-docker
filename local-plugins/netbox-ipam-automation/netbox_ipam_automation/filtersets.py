@@ -15,6 +15,7 @@ class GlobalSettingsFilterSet(NetBoxModelFilterSet):
             "scan_all_active_ranges",
             "schedule_mode",
             "default_scan_interval_minutes",
+            "max_tasks_per_template",
             "deprecated_last_seen_days",
             "deprecated_grace_period_days",
             "default_tcp_ports",

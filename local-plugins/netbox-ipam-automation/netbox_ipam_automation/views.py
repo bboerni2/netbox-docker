@@ -25,6 +25,7 @@ class GlobalSettingsPanel(ObjectAttributesPanel):
     default_scan_interval_minutes = attrs.NumericAttr("default_scan_interval_minutes", label="Default scan interval")
     default_cron_expressions = attrs.TextAttr("default_cron_expressions", label="Default cron expressions")
     max_concurrent_scans = attrs.NumericAttr("max_concurrent_scans", label="Max concurrent scans")
+    max_tasks_per_template = attrs.NumericAttr("max_tasks_per_template", label="Max tasks per template")
     deprecated_last_seen_days = attrs.NumericAttr("deprecated_last_seen_days", label="Deprecated last seen")
     deprecated_grace_period_days = attrs.NumericAttr("deprecated_grace_period_days", label="Deprecated grace period")
     default_tcp_ports = attrs.TextAttr("default_tcp_ports", label="Default TCP ports")

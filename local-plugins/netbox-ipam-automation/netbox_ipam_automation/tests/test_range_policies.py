@@ -13,6 +13,7 @@ from netbox_ipam_automation.jobs import (
     ScheduleScanRunsJob,
     create_due_scheduled_scan_runs,
     execute_scan_run,
+    prune_scan_run_history,
     reconcile_stale_scan_runs,
 )
 from netbox_ipam_automation.models import GlobalSettings, RangePolicy, ScanRun
@@ -148,6 +149,7 @@ class SchedulingTest(TestCase):
                 "schedule_mode": "cron",
                 "default_cron_expressions": "0 * * * *",
                 "max_concurrent_scans": 1,
+                "max_tasks_per_template": 100,
                 "deprecated_last_seen_days": 2,
                 "deprecated_grace_period_days": 14,
                 "default_tcp_ports": "22,80,443,3389",
@@ -163,12 +165,16 @@ class SchedulingTest(TestCase):
     def test_global_deprecation_defaults_are_validated(self):
         settings = GlobalSettings(deprecated_last_seen_days=2, deprecated_grace_period_days=14)
         settings.full_clean()
+        self.assertEqual(settings.max_tasks_per_template, 100)
 
         with self.assertRaises(ValidationError):
             GlobalSettings(deprecated_last_seen_days=0, deprecated_grace_period_days=14).full_clean()
 
         with self.assertRaises(ValidationError):
             GlobalSettings(deprecated_last_seen_days=2, deprecated_grace_period_days=0).full_clean()
+
+        with self.assertRaises(ValidationError):
+            GlobalSettings(max_tasks_per_template=0).full_clean()
 
     @patch("netbox_ipam_automation.jobs.enqueue_scan_run")
     def test_global_default_schedules_active_ranges_without_policies(self, enqueue_scan_run):
@@ -339,6 +345,69 @@ class SchedulerRecoveryTest(TestCase):
         core_job.refresh_from_db()
         self.assertEqual(scan_run.status, ScanRun.StatusChoices.FAILED)
         self.assertEqual(core_job.status, "errored")
+
+
+class ScanRunRetentionTest(TestCase):
+    def _range(self, start, end):
+        ip_range = IPRange(start_address=start, end_address=end, status="active")
+        ip_range.full_clean()
+        ip_range.save()
+        return ip_range
+
+    def _terminal_run(self, **kwargs):
+        return ScanRun.objects.create(status=ScanRun.StatusChoices.COMPLETED, **kwargs)
+
+    def test_prunes_combined_netid_history_and_related_job_but_keeps_active_runs(self):
+        target_range = self._range("192.0.2.0/30", "192.0.2.3/30")
+        other_range = self._range("192.0.2.4/30", "192.0.2.7/30")
+        policy = RangePolicy.objects.create(name="Retention policy", target_range=target_range)
+        oldest = self._terminal_run(policy=policy, target_cidr="192.0.2.0-192.0.2.3")
+        self._terminal_run(target_range=target_range, target_cidr="192.0.2.0-192.0.2.3")
+        self._terminal_run(target_range=target_range, target_cidr="192.0.2.0-192.0.2.3")
+        active = ScanRun.objects.create(target_range=target_range, status=ScanRun.StatusChoices.RUNNING)
+        self._terminal_run(target_range=other_range, target_cidr="192.0.2.4-192.0.2.7")
+        self._terminal_run(target_range=other_range, target_cidr="192.0.2.4-192.0.2.7")
+        related_job = Job.objects.create(
+            object=oldest,
+            name="Execute IPAM scan run",
+            status="completed",
+            job_id=uuid4(),
+            queue_name="default",
+            log_entries=[{"level": "info", "message": "old log"}],
+        )
+        highest_id = ScanRun.objects.order_by("-pk").values_list("pk", flat=True).first()
+
+        self.assertEqual(prune_scan_run_history(max_tasks=2), 1)
+
+        self.assertFalse(ScanRun.objects.filter(pk=oldest.pk).exists())
+        self.assertFalse(Job.objects.filter(pk=related_job.pk).exists())
+        self.assertTrue(ScanRun.objects.filter(pk=active.pk).exists())
+        self.assertEqual(ScanRun.objects.filter(target_range=target_range, status="completed").count(), 2)
+        self.assertEqual(ScanRun.objects.filter(target_range=other_range, status="completed").count(), 2)
+        self.assertGreater(self._terminal_run(target_range=target_range).pk, highest_id)
+
+    def test_target_cidr_is_used_when_policy_and_range_are_missing(self):
+        runs = [self._terminal_run(target_cidr="198.51.100.0-198.51.100.3") for _ in range(3)]
+
+        self.assertEqual(prune_scan_run_history(max_tasks=2), 1)
+        self.assertFalse(ScanRun.objects.filter(pk=runs[0].pk).exists())
+        self.assertEqual(ScanRun.objects.filter(pk__in=[runs[1].pk, runs[2].pk]).count(), 2)
+
+    def test_scheduler_prunes_when_scan_scheduling_is_disabled(self):
+        target_range = self._range("203.0.113.0/30", "203.0.113.3/30")
+        GlobalSettings.objects.create(enabled=False, max_tasks_per_template=1)
+        self._terminal_run(target_range=target_range)
+        self._terminal_run(target_range=target_range)
+        core_job = Job.objects.create(
+            name=ScheduleScanRunsJob.name,
+            status="running",
+            job_id=uuid4(),
+            queue_name="default",
+        )
+
+        ScheduleScanRunsJob(core_job).run()
+
+        self.assertEqual(ScanRun.objects.filter(target_range=target_range).count(), 1)
 
 
 class ScanStatusPolicyTest(TestCase):

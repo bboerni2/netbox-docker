@@ -29,6 +29,7 @@ class GlobalSettings(NetBoxModel):
     default_scan_interval_minutes = models.PositiveIntegerField(default=60)
     default_cron_expressions = models.TextField(default="0 * * * *")
     max_concurrent_scans = models.PositiveIntegerField(default=1)
+    max_tasks_per_template = models.PositiveIntegerField(default=100)
     deprecated_last_seen_days = models.PositiveIntegerField(default=2)
     deprecated_grace_period_days = models.PositiveIntegerField(default=14)
     default_tcp_ports = models.CharField(max_length=255, default="22,80,443,3389")
@@ -50,6 +51,8 @@ class GlobalSettings(NetBoxModel):
             raise ValidationError("default_scan_interval_minutes must be >= 1.")
         if self.max_concurrent_scans < 1:
             raise ValidationError("max_concurrent_scans must be >= 1.")
+        if self.max_tasks_per_template < 1:
+            raise ValidationError("max_tasks_per_template must be >= 1.")
         if self.deprecated_last_seen_days < 1:
             raise ValidationError("deprecated_last_seen_days must be >= 1.")
         if self.deprecated_grace_period_days < 1:

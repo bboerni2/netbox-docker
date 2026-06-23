@@ -97,6 +97,40 @@ def reconcile_stale_scan_runs(*, now=None) -> int:
     return reconciled
 
 
+def scan_run_retention_key(scan_run: ScanRun) -> tuple[str, object]:
+    target_range_id = scan_run.target_range_id
+    if not target_range_id and scan_run.policy_id and scan_run.policy:
+        target_range_id = scan_run.policy.target_range_id
+    if target_range_id:
+        return "range", target_range_id
+    if scan_run.target_cidr:
+        return "target", scan_run.target_cidr
+    if scan_run.policy_id:
+        return "policy", scan_run.policy_id
+    return "run", scan_run.pk
+
+
+def prune_scan_run_history(*, max_tasks=None) -> int:
+    limit = get_global_settings().max_tasks_per_template if max_tasks is None else max_tasks
+    if limit < 1:
+        raise ValueError("max_tasks must be >= 1")
+    counts = {}
+    delete_ids = []
+    queryset = (
+        ScanRun.objects.filter(status__in=TERMINAL_SCANRUN_STATUSES)
+        .select_related("policy__target_range")
+        .order_by("-created", "-pk")
+    )
+    for scan_run in queryset.iterator(chunk_size=1000):
+        key = scan_run_retention_key(scan_run)
+        counts[key] = counts.get(key, 0) + 1
+        if counts[key] > limit:
+            delete_ids.append(scan_run.pk)
+    if delete_ids:
+        ScanRun.objects.filter(pk__in=delete_ids).delete()
+    return len(delete_ids)
+
+
 def get_policy_target(policy: RangePolicy | None) -> str:
     if not policy:
         return ""
@@ -473,5 +507,6 @@ class ScheduleScanRunsJob(JobRunner):
         return super().enqueue_once(*args, **kwargs)
 
     def run(self, *args, **kwargs):
+        pruned = prune_scan_run_history()
         result = create_due_scheduled_scan_runs()
-        self.logger.info(f"Created {result['created']} scheduled scan runs")
+        self.logger.info(f"Created {result['created']} scheduled scan runs; pruned {pruned} old scan runs")

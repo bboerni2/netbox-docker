@@ -17,6 +17,7 @@ class GlobalSettingsSerializer(NetBoxModelSerializer):
             "default_scan_interval_minutes",
             "default_cron_expressions",
             "max_concurrent_scans",
+            "max_tasks_per_template",
             "deprecated_last_seen_days",
             "deprecated_grace_period_days",
             "default_tcp_ports",
