@@ -8,7 +8,7 @@ from django.utils.text import slugify
 from netbox.models import NetBoxModel, OrganizationalModel, PrimaryModel
 from netbox.models.features import JobsMixin
 
-from .services import as_ipv4_address, ip_range_to_network, normalize_cidr, normalize_cron_expressions, normalize_tcp_ports
+from .services import as_ipv4_address, ip_range_to_network, normalize_cidr, normalize_cron_expressions
 
 
 def ip_range_to_target(value) -> str:
@@ -22,6 +22,11 @@ class GlobalSettings(NetBoxModel):
         INTERVAL = "interval", "Interval"
         CRON = "cron", "Cron"
 
+    class DiscoveryModeChoices(models.TextChoices):
+        AUTO = "auto", "Auto"
+        ROUTED = "routed", "Routed"
+        LOCAL_L2 = "local_l2", "Local L2"
+
     name = models.CharField(max_length=100, unique=True, default="default")
     enabled = models.BooleanField(default=True)
     scan_all_active_ranges = models.BooleanField(default=False)
@@ -32,10 +37,13 @@ class GlobalSettings(NetBoxModel):
     max_tasks_per_template = models.PositiveIntegerField(default=100)
     deprecated_last_seen_days = models.PositiveIntegerField(default=2)
     deprecated_grace_period_days = models.PositiveIntegerField(default=14)
-    default_tcp_ports = models.CharField(max_length=255, default="22,80,443,3389")
-    tcp_timeout_seconds = models.PositiveIntegerField(default=1)
-    tcp_worker_count = models.PositiveIntegerField(default=64)
-    reverse_dns_enabled = models.BooleanField(default=True)
+    default_discovery_mode = models.CharField(
+        max_length=16,
+        choices=DiscoveryModeChoices,
+        default=DiscoveryModeChoices.ROUTED,
+    )
+    non_admin_can_create_range_policies = models.BooleanField(default=False)
+    non_admin_can_run_scans = models.BooleanField(default=False)
 
     class Meta:
         ordering = ("name",)
@@ -57,14 +65,6 @@ class GlobalSettings(NetBoxModel):
             raise ValidationError("deprecated_last_seen_days must be >= 1.")
         if self.deprecated_grace_period_days < 1:
             raise ValidationError("deprecated_grace_period_days must be >= 1.")
-        if self.tcp_timeout_seconds < 1:
-            raise ValidationError("tcp_timeout_seconds must be >= 1.")
-        if self.tcp_worker_count < 1:
-            raise ValidationError("tcp_worker_count must be >= 1.")
-        try:
-            self.default_tcp_ports = normalize_tcp_ports(self.default_tcp_ports)
-        except ValueError as exc:
-            raise ValidationError({"default_tcp_ports": str(exc)}) from exc
         try:
             self.default_cron_expressions = normalize_cron_expressions(self.default_cron_expressions)
         except ValueError as exc:
@@ -85,6 +85,11 @@ class RangePolicy(OrganizationalModel):
         INTERVAL = "interval", "Interval"
         CRON = "cron", "Cron"
 
+    class DiscoveryModeChoices(models.TextChoices):
+        INHERIT = "inherit", "Inherit"
+        ROUTED = "routed", "Routed"
+        LOCAL_L2 = "local_l2", "Local L2"
+
     target_cidr = models.CharField(max_length=64, unique=True, null=True, blank=True)
     target_range = models.OneToOneField(
         to="ipam.IPRange",
@@ -99,7 +104,11 @@ class RangePolicy(OrganizationalModel):
     schedule_mode = models.CharField(max_length=16, choices=ScheduleModeChoices, default=ScheduleModeChoices.INHERIT)
     interval_minutes = models.PositiveIntegerField(null=True, blank=True)
     cron_expressions = models.TextField(blank=True)
-    tcp_ports = models.CharField(max_length=255, blank=True)
+    discovery_mode = models.CharField(
+        max_length=16,
+        choices=DiscoveryModeChoices,
+        default=DiscoveryModeChoices.INHERIT,
+    )
 
     class Meta:
         ordering = ("name",)
@@ -140,10 +149,6 @@ class RangePolicy(OrganizationalModel):
             self.cron_expressions = normalize_cron_expressions(self.cron_expressions)
         except ValueError as exc:
             raise ValidationError({"cron_expressions": str(exc)}) from exc
-        try:
-            self.tcp_ports = normalize_tcp_ports(self.tcp_ports, allow_blank=True)
-        except ValueError as exc:
-            raise ValidationError({"tcp_ports": str(exc)}) from exc
         if self.schedule_mode == self.ScheduleModeChoices.INTERVAL and not self.interval_minutes:
             raise ValidationError({"interval_minutes": "An interval is required for interval scheduling."})
         if self.schedule_mode == self.ScheduleModeChoices.CRON and not self.cron_expressions:
@@ -214,6 +219,7 @@ class ScanRun(JobsMixin, PrimaryModel):
     error_count = models.PositiveIntegerField(default=0)
     summary = models.JSONField(default=dict, blank=True)
     message = models.CharField(max_length=255, blank=True)
+    dry_run = models.BooleanField(default=False)
 
     class Meta:
         ordering = ("-created",)

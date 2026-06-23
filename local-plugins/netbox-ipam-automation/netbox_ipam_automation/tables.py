@@ -10,7 +10,6 @@ class GlobalSettingsTable(NetBoxTable):
     default_scan_interval_minutes = tables.Column(verbose_name="Default scan interval")
     deprecated_last_seen_days = tables.Column(verbose_name="Deprecated last seen")
     deprecated_grace_period_days = tables.Column(verbose_name="Deprecated grace period")
-    default_tcp_ports = tables.Column(verbose_name="Default TCP ports")
 
     class Meta(NetBoxTable.Meta):
         model = GlobalSettings
@@ -26,10 +25,9 @@ class GlobalSettingsTable(NetBoxTable):
             "max_tasks_per_template",
             "deprecated_last_seen_days",
             "deprecated_grace_period_days",
-            "default_tcp_ports",
-            "tcp_timeout_seconds",
-            "tcp_worker_count",
-            "reverse_dns_enabled",
+            "default_discovery_mode",
+            "non_admin_can_create_range_policies",
+            "non_admin_can_run_scans",
         )
         default_columns = (
             "name",
@@ -40,7 +38,7 @@ class GlobalSettingsTable(NetBoxTable):
             "max_tasks_per_template",
             "deprecated_last_seen_days",
             "deprecated_grace_period_days",
-            "default_tcp_ports",
+            "default_discovery_mode",
         )
 
 
@@ -58,13 +56,13 @@ class RangePolicyTable(NetBoxTable):
             "target_cidr",
             "scan_start",
             "scan_end",
-            "tcp_ports",
+            "discovery_mode",
             "enabled",
             "schedule_mode",
             "interval_minutes",
             "cron_expressions",
         )
-        default_columns = ("name", "target_range", "scan_start", "scan_end", "tcp_ports", "enabled", "schedule_mode")
+        default_columns = ("name", "target_range", "scan_start", "scan_end", "discovery_mode", "enabled", "schedule_mode")
 
 
 class ScanRunTable(NetBoxTable):
@@ -94,6 +92,7 @@ class ScanRunTable(NetBoxTable):
             "requested_by",
             "trigger",
             "classification",
+            "dry_run",
             "target_cidr",
             "scheduled_for",
             "started_at",

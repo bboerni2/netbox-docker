@@ -91,10 +91,12 @@ docker compose \
 - Plugin: `local-plugins/netbox-ipam-automation`.
 - Activation: `configuration/zz_local_plugins.py`, loaded after base configuration.
 - Dependencies: `requirements-plugins.txt`; local plugin is installed by `Dockerfile-withplugins`.
+- `Dockerfile-withplugins` also installs `nmap` in the custom NetBox image.
+- `configuration/initializers/extras/custom_fields.yml` is the 23-row mapping generated from `/mnt/c/Users/b.hauser/Downloads/netbox_custom fields.csv`; `MacAddress` targets `dcim.models.Device` and `ipam.models.IPAddress`.
 - Core implementation: models/forms/jobs/services plus native NetBox tables, views, API serializers, migrations, and tests.
 - Use native NetBox 4.6 UI patterns. Do not add React, Vue, CSS frameworks, icon libraries, or a separate dashboard.
-- Scanner v1 is internal TCP probing with Python stdlib only. It does not use the old Semaphore script, API tokens, ICMP, or nmap.
-- Default TCP ports: `22,80,443,3389`; timeout: 1 second; workers: 64; reverse DNS is best effort.
+- Scanner v2 uses `nmap` XML host discovery from the NetBox worker. It does not use the old Semaphore script, API tokens, or Python nmap wrappers.
+- Discovery modes are `routed` (default), `local_l2`, and `auto` (safe fallback to routed without reliable interface evidence). Hostname enrichment is separate from activity evidence.
 
 ## IPAM automation policies
 
@@ -114,9 +116,9 @@ docker compose \
 - With `max_concurrent_scans=1`, due explicit policies run first and implicit ranges then proceed one at a time; do not expect every active range to appear immediately.
 - `max_tasks_per_template` retains the newest terminal ScanRuns per effective IPRange/NetID (default 100). Explicit and implicit runs share the limit; active runs are never pruned.
 - Retention runs in the existing minutely scheduler even when scan scheduling is disabled. Pruning a ScanRun also removes its related Core Job/logs; PostgreSQL task IDs remain monotonic.
-- ScanRun history stores target range, task state, counters, summary, errors, hostnames, and open ports in native NetBox views.
+- ScanRun history stores target range, task state, counters, summary, errors, hostnames, MAC observations, discovery mode, and dry-run plans in native NetBox views.
 
-Last observed mutable settings on 2026-06-23 (verify before acting): scheduler enabled, scan-all-active enabled, interval 55 minutes, retention 100 tasks per NetID, deprecation 2/14 days, TCP defaults `22,80,443,3389`, reverse DNS enabled.
+Last observed mutable settings on 2026-06-23 (verify before acting): scheduler enabled, scan-all-active enabled, interval 55 minutes, retention 100 tasks per NetID, deprecation 2/14 days.
 
 ## NetBox status and import traps
 
@@ -143,7 +145,7 @@ docker compose -f docker-compose.yml -f docker-compose.runtime.yml -f docker-com
 ```
 
 - Verify relevant authenticated plugin routes return 200 and the expected field/label appears in rendered HTML.
-- Verify all required services are healthy and TCP routing from `netbox-worker` to the intended target network before claiming real-network scan readiness.
+- Verify all required services are healthy and `nmap` discovery from `netbox-worker` to the intended target network before claiming real-network scan readiness.
 - Run `git diff --check`; preserve unrelated user changes; commit and push only after checks pass.
 
 ## Operating rules

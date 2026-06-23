@@ -18,10 +18,9 @@ class GlobalSettingsFilterSet(NetBoxModelFilterSet):
             "max_tasks_per_template",
             "deprecated_last_seen_days",
             "deprecated_grace_period_days",
-            "default_tcp_ports",
-            "tcp_timeout_seconds",
-            "tcp_worker_count",
-            "reverse_dns_enabled",
+            "default_discovery_mode",
+            "non_admin_can_create_range_policies",
+            "non_admin_can_run_scans",
         )
 
     def search(self, queryset, name, value):
@@ -34,7 +33,7 @@ class GlobalSettingsFilterSet(NetBoxModelFilterSet):
 class RangePolicyFilterSet(NetBoxModelFilterSet):
     class Meta:
         model = RangePolicy
-        fields = ("name", "slug", "target_range", "target_cidr", "tcp_ports", "enabled", "schedule_mode")
+        fields = ("name", "slug", "target_range", "target_cidr", "discovery_mode", "enabled", "schedule_mode")
 
     def search(self, queryset, name, value):
         if not value:
@@ -48,7 +47,7 @@ class RangePolicyFilterSet(NetBoxModelFilterSet):
 class ScanRunFilterSet(NetBoxModelFilterSet):
     class Meta:
         model = ScanRun
-        fields = ("policy", "target_range", "status", "trigger", "classification", "target_cidr")
+        fields = ("policy", "target_range", "status", "trigger", "classification", "target_cidr", "dry_run")
 
     def search(self, queryset, name, value):
         if not value:

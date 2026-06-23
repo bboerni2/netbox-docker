@@ -1,16 +1,19 @@
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from ipaddress import IPv4Address, IPv4Network, ip_address, ip_network, summarize_address_range
+import re
 import socket
+import subprocess
 
 from croniter import croniter
 from django.db import transaction
 from django.utils import timezone as django_timezone
+from defusedxml import ElementTree
 
 MANAGED_IP_STATUSES = {"active", "free", "deprecated"}
 SCAN_ERROR_LIMIT = 50
+NMAP_ROUTED_PROBES = ("-PE", "-PP", "-PS22,80,443,445,3389", "-PA80,443", "-PU53,161")
 
 
 def normalize_cidr(value: str) -> str:
@@ -54,34 +57,6 @@ def parse_cron_expressions(value: str) -> list[str]:
 
 def normalize_cron_expressions(value: str) -> str:
     return "\n".join(parse_cron_expressions(value))
-
-
-def parse_tcp_ports(value: str, *, allow_blank: bool = False) -> list[int]:
-    ports: list[int] = []
-    seen: set[int] = set()
-    normalized = str(value or "").replace("\n", ",").replace(" ", ",")
-
-    for raw_port in normalized.split(","):
-        raw_port = raw_port.strip()
-        if not raw_port:
-            continue
-        try:
-            port = int(raw_port)
-        except ValueError as exc:
-            raise ValueError(f"Invalid TCP port '{raw_port}'.") from exc
-        if port < 1 or port > 65535:
-            raise ValueError(f"TCP port {port} must be between 1 and 65535.")
-        if port not in seen:
-            seen.add(port)
-            ports.append(port)
-
-    if not ports and not allow_blank:
-        raise ValueError("At least one TCP port is required.")
-    return ports
-
-
-def normalize_tcp_ports(value: str, *, allow_blank: bool = False) -> str:
-    return ",".join(str(port) for port in parse_tcp_ports(value, allow_blank=allow_blank))
 
 
 def next_scheduled_for(
@@ -216,31 +191,90 @@ def parse_deprecated_since(description: str) -> datetime | None:
         return None
 
 
-def apply_scan_observations(policy, responsive_hosts, *, global_settings, hostnames=None, now=None) -> dict[str, int]:
+def sanitize_hostname(hostname: str | None) -> str | None:
+    if not hostname:
+        return None
+    value = re.sub(r"[^a-zA-Z0-9._-]", "", hostname.strip().rstrip("."))
+    return value[:255] or None
+
+
+def normalize_mac_address(value: str | None) -> str | None:
+    if not value:
+        return None
+    stripped = re.sub(r"[^0-9A-Fa-f]", "", value)
+    if len(stripped) != 12:
+        return None
+    return ":".join(stripped[index : index + 2] for index in range(0, 12, 2)).lower()
+
+
+def ipaddress_has_mac_custom_field() -> bool:
+    from django.contrib.contenttypes.models import ContentType
+    from extras.models import CustomField
+    from ipam.models import IPAddress
+
+    content_type = ContentType.objects.get_for_model(IPAddress)
+    return CustomField.objects.filter(name="MacAddress", object_types=content_type).exists()
+
+
+def discovery_maps(discovery_results) -> tuple[set[object], dict[str, str], dict[str, str]]:
+    responsive = set()
+    hostnames = {}
+    mac_addresses = {}
+    for result in discovery_results or []:
+        if not result.get("is_active"):
+            continue
+        host = str(ip_address(str(result["ip"]).split("/", 1)[0]))
+        responsive.add(ip_address(host))
+        hostname = sanitize_hostname(result.get("hostname")) or sanitize_hostname(reverse_dns(host))
+        mac_address = normalize_mac_address(result.get("mac_address"))
+        if hostname:
+            hostnames[host] = hostname
+        if mac_address:
+            mac_addresses[host] = mac_address
+    return responsive, hostnames, mac_addresses
+
+
+def apply_scan_observations(
+    policy,
+    discovery_results,
+    *,
+    global_settings,
+    now=None,
+    dry_run: bool = False,
+) -> dict[str, object]:
     from ipam.models import IPAddress
 
     now = now or django_timezone.now()
-    hostnames = hostnames or {}
     network = ip_range_to_network(policy.target_range.start_address, policy.target_range.end_address)
-    responsive = {ip_address(str(host).split("/", 1)[0]) for host in responsive_hosts}
+    responsive, hostnames, mac_addresses = discovery_maps(discovery_results)
     deprecated_cutoff = now - timedelta(days=global_settings.deprecated_last_seen_days)
     free_cutoff_days = global_settings.deprecated_grace_period_days
+    can_write_mac = ipaddress_has_mac_custom_field()
     summary = {
         "observed_hosts": 0,
-        "responsive_hosts": 0,
+        "responsive_hosts": len(responsive),
         "updated": 0,
+        "created": 0,
+        "planned_creates": [],
+        "planned_active_updates": [],
+        "planned_deprecations": [],
+        "planned_frees": [],
         "skipped_protected": 0,
+        "warnings": [],
     }
+    if mac_addresses and not can_write_mac:
+        summary["warnings"].append("MacAddress custom field is missing for ipam.ipaddress; skipped MAC writes.")
 
+    existing_by_host = {}
     for ip_obj in IPAddress.objects.filter(vrf_id=policy.target_range.vrf_id):
         host = ip_address(str(ip_obj.address).split("/", 1)[0])
         if host not in network:
             continue
+        existing_by_host[host] = ip_obj
 
+    for host, ip_obj in existing_by_host.items():
         summary["observed_hosts"] += 1
         is_responsive = host in responsive
-        if is_responsive:
-            summary["responsive_hosts"] += 1
 
         if ip_obj.status not in MANAGED_IP_STATUSES:
             summary["skipped_protected"] += 1
@@ -252,17 +286,24 @@ def apply_scan_observations(policy, responsive_hosts, *, global_settings, hostna
                 ip_obj.status = "active"
                 update_fields.append("status")
             hostname = hostnames.get(str(host))
-            if hostname and ip_obj.dns_name != hostname:
+            if hostname and not ip_obj.dns_name:
                 ip_obj.dns_name = hostname
                 update_fields.append("dns_name")
+            mac_address = mac_addresses.get(str(host))
+            if mac_address and can_write_mac and not (ip_obj.custom_field_data or {}).get("MacAddress"):
+                ip_obj.custom_field_data = {**(ip_obj.custom_field_data or {}), "MacAddress": mac_address}
+                update_fields.append("custom_field_data")
             if ip_obj.description.startswith("Deprecated since "):
                 ip_obj.description = ""
                 update_fields.append("description")
+            if update_fields:
+                summary["planned_active_updates"].append(str(host))
         elif ip_obj.status == "active":
             if ip_obj.last_updated and ip_obj.last_updated <= deprecated_cutoff:
                 ip_obj.status = "deprecated"
                 ip_obj.description = f"Deprecated since {now.date().isoformat()}"
                 update_fields.extend(("status", "description"))
+                summary["planned_deprecations"].append(str(host))
         elif ip_obj.status == "deprecated":
             deprecated_since = parse_deprecated_since(ip_obj.description)
             if deprecated_since and (now.date() - deprecated_since.date()).days >= free_cutoff_days:
@@ -270,16 +311,41 @@ def apply_scan_observations(policy, responsive_hosts, *, global_settings, hostna
                 ip_obj.description = ""
                 ip_obj.dns_name = ""
                 update_fields.extend(("status", "description", "dns_name"))
+                summary["planned_frees"].append(str(host))
         elif ip_obj.status == "free" and (ip_obj.description or ip_obj.dns_name):
             ip_obj.description = ""
             ip_obj.dns_name = ""
             update_fields.extend(("description", "dns_name"))
 
         if update_fields:
-            ip_obj.full_clean()
-            ip_obj.save(update_fields=(*update_fields, "last_updated"))
+            if not dry_run:
+                ip_obj.full_clean()
+                ip_obj.save(update_fields=(*update_fields, "last_updated"))
             summary["updated"] += 1
 
+    missing_hosts = sorted(responsive - set(existing_by_host), key=int)
+    for host in missing_hosts:
+        if host not in network:
+            continue
+        address = f"{host}/{network.prefixlen}"
+        summary["planned_creates"].append(str(host))
+        if dry_run:
+            continue
+        ip_obj = IPAddress(
+            address=address,
+            vrf=policy.target_range.vrf,
+            tenant=policy.target_range.tenant,
+            status="active",
+            dns_name=hostnames.get(str(host), ""),
+        )
+        mac_address = mac_addresses.get(str(host))
+        if mac_address and can_write_mac:
+            ip_obj.custom_field_data = {"MacAddress": mac_address}
+        ip_obj.full_clean()
+        ip_obj.save()
+        summary["created"] += 1
+
+    summary["observed_hosts"] = max(summary["observed_hosts"], len(responsive))
     return summary
 
 
@@ -293,21 +359,6 @@ def iter_policy_scan_hosts(policy):
         current += 1
 
 
-def get_policy_tcp_ports(policy, global_settings) -> list[int]:
-    return parse_tcp_ports(policy.tcp_ports or global_settings.default_tcp_ports)
-
-
-def probe_tcp_host(host: str, ports: list[int], timeout: int) -> dict[str, object]:
-    errors = []
-    for port in ports:
-        try:
-            with socket.create_connection((host, port), timeout=timeout):
-                return {"host": host, "responsive": True, "open_ports": [port], "errors": errors}
-        except OSError as exc:
-            errors.append({"host": host, "port": port, "error": type(exc).__name__})
-    return {"host": host, "responsive": False, "open_ports": [], "errors": errors}
-
-
 def reverse_dns(host: str) -> str | None:
     try:
         return socket.gethostbyaddr(host)[0]
@@ -315,44 +366,127 @@ def reverse_dns(host: str) -> str | None:
         return None
 
 
+class DiscoveryError(RuntimeError):
+    pass
+
+
+def effective_discovery_mode(policy, global_settings) -> str:
+    mode = getattr(policy, "discovery_mode", "inherit") or "inherit"
+    if mode == "inherit":
+        mode = getattr(global_settings, "default_discovery_mode", "routed") or "routed"
+    if mode == "auto":
+        return "routed"
+    if mode not in {"routed", "local_l2"}:
+        raise ValueError(f"Unsupported discovery mode '{mode}'.")
+    return mode
+
+
+def nmap_targets_for_policy(policy) -> list[str]:
+    network = ip_range_to_network(policy.target_range.start_address, policy.target_range.end_address)
+    start = ip_address(str(policy.scan_start or network.network_address).split("/", 1)[0])
+    end = ip_address(str(policy.scan_end or network.broadcast_address).split("/", 1)[0])
+    if start == network.network_address and end == network.broadcast_address:
+        return [str(network)]
+    return list(iter_policy_scan_hosts(policy))
+
+
+def build_nmap_command(policy, global_settings) -> tuple[list[str], str, list[str]]:
+    mode = effective_discovery_mode(policy, global_settings)
+    targets = nmap_targets_for_policy(policy)
+    if mode == "local_l2":
+        return ["nmap", "-sn", "-PR", "-n", *targets, "-oX", "-"], mode, targets
+    return [
+        "nmap",
+        "-sn",
+        "-n",
+        *NMAP_ROUTED_PROBES,
+        "--max-retries",
+        "1",
+        "--host-timeout",
+        "5s",
+        *targets,
+        "-oX",
+        "-",
+    ], mode, targets
+
+
+def parse_nmap_xml(xml_text: str) -> list[dict[str, object]]:
+    try:
+        root = ElementTree.fromstring(xml_text)
+    except ElementTree.ParseError as exc:
+        raise DiscoveryError(f"Malformed nmap XML: {exc}") from exc
+
+    results = []
+    for host in root.findall("host"):
+        status = host.find("status")
+        is_active = status is not None and status.get("state") == "up"
+        address = None
+        mac_address = None
+        vendor = None
+        for item in host.findall("address"):
+            if item.get("addrtype") == "ipv4":
+                address = item.get("addr")
+            elif item.get("addrtype") == "mac":
+                mac_address = normalize_mac_address(item.get("addr"))
+                vendor = item.get("vendor")
+        if not address:
+            continue
+        hostname = None
+        hostname_node = host.find("hostnames/hostname")
+        if hostname_node is not None:
+            hostname = sanitize_hostname(hostname_node.get("name"))
+        results.append(
+            {
+                "ip": address,
+                "is_active": is_active,
+                "sources": ["nmap"] if is_active else [],
+                "hostname": hostname,
+                "mac_address": mac_address,
+                "vendor": vendor,
+                "raw": {"state": status.get("state") if status is not None else None},
+            }
+        )
+    return results
+
+
 def scan_range(policy, *, global_settings) -> dict[str, object]:
-    ports = get_policy_tcp_ports(policy, global_settings)
-    hosts = list(iter_policy_scan_hosts(policy))
-    timeout = int(global_settings.tcp_timeout_seconds)
-    worker_count = min(int(global_settings.tcp_worker_count), max(len(hosts), 1))
-    responsive_hosts: list[str] = []
-    open_ports: dict[str, list[int]] = {}
-    errors: list[dict[str, object]] = []
+    command, mode, targets = build_nmap_command(policy, global_settings)
+    completed = subprocess.run(command, capture_output=True, text=True, check=False)
+    if completed.returncode != 0:
+        message = (completed.stderr or completed.stdout or "nmap failed").strip()
+        raise DiscoveryError(message[:500])
 
-    with ThreadPoolExecutor(max_workers=worker_count) as executor:
-        futures = [executor.submit(probe_tcp_host, host, ports, timeout) for host in hosts]
-        for future in as_completed(futures):
-            result = future.result()
-            host = str(result["host"])
-            if result["responsive"]:
-                responsive_hosts.append(host)
-                open_ports[host] = result["open_ports"]
-            if len(errors) < SCAN_ERROR_LIMIT:
-                remaining = SCAN_ERROR_LIMIT - len(errors)
-                errors.extend(result["errors"][:remaining])
-
-    responsive_hosts.sort(key=lambda value: int(ip_address(value)))
-    hostnames = {}
-    if global_settings.reverse_dns_enabled:
-        for host in responsive_hosts:
-            hostname = reverse_dns(host)
+    results = parse_nmap_xml(completed.stdout)
+    responsive_hosts = sorted(
+        [result["ip"] for result in results if result.get("is_active")],
+        key=lambda value: int(ip_address(value)),
+    )
+    hostnames = {
+        result["ip"]: result["hostname"]
+        for result in results
+        if result.get("is_active") and result.get("hostname")
+    }
+    for host in responsive_hosts:
+        if host not in hostnames:
+            hostname = sanitize_hostname(reverse_dns(host))
             if hostname:
                 hostnames[host] = hostname
 
     return {
-        "scanned_hosts": len(hosts),
+        "adapter": "nmap",
+        "discovery_mode": mode,
+        "command": command,
+        "targets": targets,
+        "results": results,
+        "scanned_hosts": len(results),
         "responsive_hosts": responsive_hosts,
-        "open_ports": open_ports,
         "hostnames": hostnames,
-        "errors": errors,
-        "ports": ports,
-        "timeout_seconds": timeout,
-        "worker_count": worker_count,
+        "mac_addresses": {
+            result["ip"]: result["mac_address"]
+            for result in results
+            if result.get("is_active") and result.get("mac_address")
+        },
+        "errors": [],
     }
 
 
@@ -364,11 +498,11 @@ def build_scan_request(
 ) -> dict[str, object]:
     return {
         "accepted": True,
-        "mode": "stub",
+        "mode": "nmap",
         "scan_run_id": scan_run_id,
         "target_cidr": target_cidr if "-" in target_cidr else normalize_cidr(target_cidr),
         "scheduled_for": scheduled_for.isoformat() if scheduled_for else None,
-        "message": "Raw network scanning is intentionally not implemented in this skeleton.",
+        "message": "nmap discovery request accepted.",
     }
 
 

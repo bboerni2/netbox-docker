@@ -3,8 +3,10 @@ from unittest.mock import patch
 from uuid import uuid4
 
 from core.models import Job
+from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
 from django.test import TestCase, override_settings
+from django.urls import reverse
 from ipam.models import IPAddress, IPRange
 
 from netbox_ipam_automation.forms import GlobalSettingsForm, RangePolicyForm
@@ -18,22 +20,15 @@ from netbox_ipam_automation.jobs import (
 )
 from netbox_ipam_automation.models import GlobalSettings, RangePolicy, ScanRun
 from netbox_ipam_automation.services import (
+    DiscoveryError,
     apply_scan_observations,
+    build_nmap_command,
     due_time_for_cron,
-    get_policy_tcp_ports,
     initialize_range_policy,
+    parse_nmap_xml,
     parse_cron_expressions,
-    parse_tcp_ports,
     scan_range,
 )
-
-
-class DummySocket:
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *args):
-        return None
 
 
 class RangePolicyTest(TestCase):
@@ -73,20 +68,13 @@ class RangePolicyTest(TestCase):
         self.assertEqual(dict(form.fields["schedule_mode"].choices)["inherit"], "Global default")
         self.assertIn("auto-select the first address", form.fields["scan_start"].help_text)
         self.assertIn("one five-field cron expression per line", form.fields["cron_expressions"].help_text)
-        self.assertIn("22,80,443,3389", form.fields["tcp_ports"].help_text)
+        self.assertIn("local L2", form.fields["discovery_mode"].help_text)
 
-    def test_tcp_port_override_is_validated_and_deduplicated(self):
-        policy = RangePolicy(name="TCP override", target_range=self.ip_range, tcp_ports="443,22,443")
+    def test_discovery_mode_defaults_to_inherit(self):
+        policy = RangePolicy(name="Discovery mode", target_range=self.ip_range)
         policy.full_clean()
 
-        self.assertEqual(policy.tcp_ports, "443,22")
-        self.assertEqual(parse_tcp_ports("22,80,443,3389\n22"), [22, 80, 443, 3389])
-        self.assertEqual(get_policy_tcp_ports(policy, GlobalSettings(default_tcp_ports="80")), [443, 22])
-
-        with self.assertRaises(ValueError):
-            parse_tcp_ports("0")
-        with self.assertRaises(ValueError):
-            parse_tcp_ports("ssh")
+        self.assertEqual(policy.discovery_mode, RangePolicy.DiscoveryModeChoices.INHERIT)
 
     def test_initialization_creates_only_missing_special_addresses(self):
         policy = RangePolicy(name="Initialized range", target_range=self.ip_range)
@@ -152,10 +140,7 @@ class SchedulingTest(TestCase):
                 "max_tasks_per_template": 100,
                 "deprecated_last_seen_days": 2,
                 "deprecated_grace_period_days": 14,
-                "default_tcp_ports": "22,80,443,3389",
-                "tcp_timeout_seconds": 1,
-                "tcp_worker_count": 64,
-                "reverse_dns_enabled": "on",
+                "default_discovery_mode": "routed",
             },
             instance=settings,
         )
@@ -446,7 +431,13 @@ class ScanStatusPolicyTest(TestCase):
 
         summary = apply_scan_observations(
             self.policy,
-            responsive_hosts={"192.0.2.2", "192.0.2.4", "192.0.2.5", "192.0.2.6", "192.0.2.7"},
+            [
+                {"ip": "192.0.2.2", "is_active": True, "hostname": None, "mac_address": None},
+                {"ip": "192.0.2.4", "is_active": True, "hostname": None, "mac_address": None},
+                {"ip": "192.0.2.5", "is_active": True, "hostname": None, "mac_address": None},
+                {"ip": "192.0.2.6", "is_active": True, "hostname": None, "mac_address": None},
+                {"ip": "192.0.2.7", "is_active": True, "hostname": None, "mac_address": None},
+            ],
             global_settings=self.settings,
             now=now,
         )
@@ -475,9 +466,11 @@ class ScanStatusPolicyTest(TestCase):
 
         summary = apply_scan_observations(
             self.policy,
-            responsive_hosts={"192.0.2.1", "192.0.2.2"},
+            [
+                {"ip": "192.0.2.1", "is_active": True, "hostname": "managed.example", "mac_address": None},
+                {"ip": "192.0.2.2", "is_active": True, "hostname": "protected.example", "mac_address": None},
+            ],
             global_settings=self.settings,
-            hostnames={"192.0.2.1": "managed.example", "192.0.2.2": "protected.example"},
         )
 
         managed.refresh_from_db()
@@ -498,65 +491,85 @@ class ScannerAdapterTest(TestCase):
         )
         self.ip_range.full_clean()
         self.ip_range.save()
-        self.policy = RangePolicy(name="Scanner policy", target_range=self.ip_range, tcp_ports="22,443")
+        self.policy = RangePolicy(name="Scanner policy", target_range=self.ip_range)
         self.policy.full_clean()
         self.policy.save()
         self.settings = GlobalSettings(
-            default_tcp_ports="80",
-            tcp_timeout_seconds=1,
-            tcp_worker_count=2,
-            reverse_dns_enabled=False,
+            default_discovery_mode="routed",
             deprecated_last_seen_days=2,
             deprecated_grace_period_days=14,
         )
         self.settings.full_clean()
 
-    def test_scan_range_reports_responsive_hosts_from_tcp_probe(self):
-        def connect(address, timeout):
-            host, port = address
-            if host == "203.0.113.1" and port == 443:
-                return DummySocket()
-            raise TimeoutError("closed")
+    def test_parse_nmap_xml_normalizes_hosts(self):
+        results = parse_nmap_xml(
+            """<?xml version="1.0"?>
+            <nmaprun>
+              <host><status state="up"/><address addr="203.0.113.1" addrtype="ipv4"/>
+                <address addr="AA:BB:CC:DD:EE:FF" addrtype="mac" vendor="Dell Inc."/>
+                <hostnames><hostname name="host.example.local"/></hostnames>
+              </host>
+              <host><status state="down"/><address addr="203.0.113.2" addrtype="ipv4"/></host>
+            </nmaprun>"""
+        )
 
-        with patch("netbox_ipam_automation.services.socket.create_connection", side_effect=connect):
-            result = scan_range(self.policy, global_settings=self.settings)
+        self.assertEqual(results[0]["ip"], "203.0.113.1")
+        self.assertTrue(results[0]["is_active"])
+        self.assertEqual(results[0]["hostname"], "host.example.local")
+        self.assertEqual(results[0]["mac_address"], "aa:bb:cc:dd:ee:ff")
+        self.assertEqual(results[0]["vendor"], "Dell Inc.")
+        self.assertFalse(results[1]["is_active"])
 
-        self.assertEqual(result["ports"], [22, 443])
-        self.assertEqual(result["scanned_hosts"], 4)
-        self.assertEqual(result["responsive_hosts"], ["203.0.113.1"])
-        self.assertEqual(result["open_ports"], {"203.0.113.1": [443]})
-        self.assertLessEqual(len(result["errors"]), 50)
+        with self.assertRaises(DiscoveryError):
+            parse_nmap_xml("<nmaprun>")
 
-    def test_reverse_dns_is_best_effort(self):
-        self.settings.reverse_dns_enabled = True
+    def test_discovery_mode_builds_expected_commands(self):
+        command, mode, _ = build_nmap_command(self.policy, self.settings)
+        self.assertEqual(mode, "routed")
+        self.assertIn("-PE", command)
+        self.assertIn("-PS22,80,443,445,3389", command)
+        self.assertIn("203.0.113.0/30", command)
 
-        def connect(address, timeout):
-            host, port = address
-            if host == "203.0.113.2" and port == 22:
-                return DummySocket()
-            raise ConnectionRefusedError("closed")
+        self.policy.discovery_mode = "local_l2"
+        command, mode, _ = build_nmap_command(self.policy, self.settings)
+        self.assertEqual(mode, "local_l2")
+        self.assertIn("-PR", command)
 
-        def gethostbyaddr(host):
-            if host == "203.0.113.2":
-                return ("host.example", [], [])
-            raise OSError("dns failed")
+        self.policy.discovery_mode = "inherit"
+        self.settings.default_discovery_mode = "auto"
+        _, mode, _ = build_nmap_command(self.policy, self.settings)
+        self.assertEqual(mode, "routed")
+
+    def test_scan_range_reports_responsive_hosts_from_nmap_xml(self):
+        completed = type(
+            "Completed",
+            (),
+            {
+                "returncode": 0,
+                "stdout": '<nmaprun><host><status state="up"/><address addr="203.0.113.1" addrtype="ipv4"/></host></nmaprun>',
+                "stderr": "",
+            },
+        )()
 
         with (
-            patch("netbox_ipam_automation.services.socket.create_connection", side_effect=connect),
-            patch("netbox_ipam_automation.services.socket.gethostbyaddr", side_effect=gethostbyaddr),
+            patch("netbox_ipam_automation.services.subprocess.run", return_value=completed),
+            patch("netbox_ipam_automation.services.reverse_dns", return_value=None),
         ):
             result = scan_range(self.policy, global_settings=self.settings)
 
-        self.assertEqual(result["responsive_hosts"], ["203.0.113.2"])
-        self.assertEqual(result["hostnames"], {"203.0.113.2": "host.example"})
+        self.assertEqual(result["adapter"], "nmap")
+        self.assertEqual(result["discovery_mode"], "routed")
+        self.assertEqual(result["responsive_hosts"], ["203.0.113.1"])
+
+    def test_scan_range_rejects_nmap_failure(self):
+        completed = type("Completed", (), {"returncode": 1, "stdout": "", "stderr": "permission denied"})()
+        with patch("netbox_ipam_automation.services.subprocess.run", return_value=completed):
+            with self.assertRaises(DiscoveryError):
+                scan_range(self.policy, global_settings=self.settings)
 
     @patch("netbox_ipam_automation.jobs.scan_range")
     def test_execute_scan_run_applies_observations_and_writes_summary(self, scan_range_mock):
         GlobalSettings.objects.create(
-            default_tcp_ports="22,80,443,3389",
-            tcp_timeout_seconds=1,
-            tcp_worker_count=64,
-            reverse_dns_enabled=True,
             deprecated_last_seen_days=2,
             deprecated_grace_period_days=14,
         )
@@ -564,14 +577,18 @@ class ScannerAdapterTest(TestCase):
         protected = IPAddress.objects.create(address="203.0.113.2/30", status="reserved")
         scan_run = ScanRun.objects.create(policy=self.policy, target_cidr=self.policy.target_cidr)
         scan_range_mock.return_value = {
+            "adapter": "nmap",
+            "discovery_mode": "routed",
+            "command": ["nmap"],
             "scanned_hosts": 4,
             "responsive_hosts": ["203.0.113.1", "203.0.113.2"],
-            "open_ports": {"203.0.113.1": [443], "203.0.113.2": [22]},
+            "results": [
+                {"ip": "203.0.113.1", "is_active": True, "hostname": "managed.example", "mac_address": None},
+                {"ip": "203.0.113.2", "is_active": True, "hostname": "protected.example", "mac_address": None},
+            ],
             "hostnames": {"203.0.113.1": "managed.example", "203.0.113.2": "protected.example"},
             "errors": [{"host": "203.0.113.3", "port": 22, "error": "TimeoutError"}],
-            "ports": [22, 80, 443, 3389],
-            "timeout_seconds": 1,
-            "worker_count": 64,
+            "mac_addresses": {},
         }
 
         execute_scan_run(scan_run.pk, job_id="test-job")
@@ -594,18 +611,19 @@ class ScannerAdapterTest(TestCase):
 
     @patch("netbox_ipam_automation.jobs.scan_range")
     def test_execute_scan_run_without_explicit_policy(self, scan_range_mock):
-        GlobalSettings.objects.create(reverse_dns_enabled=False)
+        GlobalSettings.objects.create()
         managed = IPAddress.objects.create(address="203.0.113.1/30", status="free")
         scan_run = ScanRun.objects.create(target_range=self.ip_range)
         scan_range_mock.return_value = {
+            "adapter": "nmap",
+            "discovery_mode": "routed",
+            "command": ["nmap"],
             "scanned_hosts": 4,
             "responsive_hosts": ["203.0.113.1"],
-            "open_ports": {"203.0.113.1": [443]},
+            "results": [{"ip": "203.0.113.1", "is_active": True, "hostname": None, "mac_address": None}],
             "hostnames": {},
             "errors": [],
-            "ports": [22, 80, 443, 3389],
-            "timeout_seconds": 1,
-            "worker_count": 4,
+            "mac_addresses": {},
         }
 
         execute_scan_run(scan_run.pk, job_id="implicit-test")
@@ -617,3 +635,53 @@ class ScannerAdapterTest(TestCase):
         self.assertEqual((implicit_policy.scan_start, implicit_policy.scan_end), ("203.0.113.0", "203.0.113.3"))
         self.assertEqual(scan_run.target_cidr, "203.0.113.0-203.0.113.3")
         self.assertEqual(managed.status, "active")
+
+    @patch("netbox_ipam_automation.jobs.scan_range")
+    def test_dry_run_does_not_mutate_ip_addresses(self, scan_range_mock):
+        GlobalSettings.objects.create()
+        managed = IPAddress.objects.create(address="203.0.113.1/30", status="free")
+        scan_run = ScanRun.objects.create(policy=self.policy, dry_run=True)
+        scan_range_mock.return_value = {
+            "adapter": "nmap",
+            "discovery_mode": "routed",
+            "command": ["nmap"],
+            "scanned_hosts": 4,
+            "responsive_hosts": ["203.0.113.1", "203.0.113.2"],
+            "results": [
+                {"ip": "203.0.113.1", "is_active": True, "hostname": "managed.example", "mac_address": None},
+                {"ip": "203.0.113.2", "is_active": True, "hostname": None, "mac_address": None},
+            ],
+            "hostnames": {"203.0.113.1": "managed.example"},
+            "errors": [],
+            "mac_addresses": {},
+        }
+
+        execute_scan_run(scan_run.pk, job_id="dry-run")
+        scan_run.refresh_from_db()
+        managed.refresh_from_db()
+
+        self.assertTrue(scan_run.summary["dry_run"])
+        self.assertEqual(scan_run.summary["planned_creates"], ["203.0.113.2"])
+        self.assertEqual(managed.status, "free")
+        self.assertFalse(IPAddress.objects.filter(address__net_host="203.0.113.2").exists())
+
+
+class PermissionGateTest(TestCase):
+    def setUp(self):
+        user_model = get_user_model()
+        self.user = user_model.objects.create_user(username="operator", password="password")
+        self.admin = user_model.objects.create_superuser(username="admin", password="password")
+
+    def test_global_settings_ui_is_superuser_only(self):
+        self.client.force_login(self.user)
+        self.assertEqual(self.client.get(reverse("plugins:netbox_ipam_automation:globalsettings_list")).status_code, 403)
+
+        self.client.force_login(self.admin)
+        self.assertEqual(self.client.get(reverse("plugins:netbox_ipam_automation:globalsettings_list")).status_code, 200)
+
+    def test_non_admin_create_gates_default_to_disabled(self):
+        GlobalSettings.objects.create()
+        self.client.force_login(self.user)
+
+        self.assertEqual(self.client.get(reverse("plugins:netbox_ipam_automation:rangepolicy_add")).status_code, 403)
+        self.assertEqual(self.client.get(reverse("plugins:netbox_ipam_automation:scanrun_add")).status_code, 403)

@@ -9,10 +9,11 @@
           <dt class="col-5">Adapter</dt>
           <dd class="col-7">{{ summary.adapter|default:"-" }}</dd>
 
-          <dt class="col-5">Ports</dt>
-          <dd class="col-7">
-            {% if summary.ports %}{{ summary.ports|join:", " }}{% else %}-{% endif %}
-          </dd>
+          <dt class="col-5">Discovery mode</dt>
+          <dd class="col-7">{{ summary.discovery_mode|default:"-" }}</dd>
+
+          <dt class="col-5">Dry run</dt>
+          <dd class="col-7">{{ summary.dry_run|yesno:"Yes,No" }}</dd>
 
           <dt class="col-5">Scanned hosts</dt>
           <dd class="col-7">{{ summary.scanned_hosts|default:"0" }}</dd>
@@ -22,6 +23,9 @@
 
           <dt class="col-5">Updated</dt>
           <dd class="col-7">{{ summary.updated|default:"0" }}</dd>
+
+          <dt class="col-5">Created</dt>
+          <dd class="col-7">{{ summary.created|default:"0" }}</dd>
 
           <dt class="col-5">Skipped protected</dt>
           <dd class="col-7">{{ summary.skipped_protected|default:"0" }}</dd>
@@ -34,7 +38,26 @@
           <h3 class="h6 mt-3">Responsive hosts</h3>
           <ul class="list-unstyled mb-0">
             {% for host in summary.responsive_hosts %}
-              <li><code>{{ host }}</code>{% if summary.open_ports|get_item:host %} <span class="text-muted">({{ summary.open_ports|get_item:host|join:", " }})</span>{% endif %}</li>
+              <li><code>{{ host }}</code></li>
+            {% endfor %}
+          </ul>
+        {% endif %}
+
+        {% if summary.mac_addresses %}
+          <h3 class="h6 mt-3">MAC addresses</h3>
+          <dl class="row mb-0">
+            {% for host, mac_address in summary.mac_addresses.items %}
+              <dt class="col-5"><code>{{ host }}</code></dt>
+              <dd class="col-7">{{ mac_address }}</dd>
+            {% endfor %}
+          </dl>
+        {% endif %}
+
+        {% if summary.warnings %}
+          <h3 class="h6 mt-3">Warnings</h3>
+          <ul class="mb-0">
+            {% for warning in summary.warnings %}
+              <li>{{ warning }}</li>
             {% endfor %}
           </ul>
         {% endif %}
@@ -56,7 +79,6 @@
               <thead>
                 <tr>
                   <th>Host</th>
-                  <th>Port</th>
                   <th>Error</th>
                 </tr>
               </thead>
@@ -64,7 +86,6 @@
                 {% for error in summary.errors|slice:":10" %}
                   <tr>
                     <td><code>{{ error.host|default:"-" }}</code></td>
-                    <td>{{ error.port|default:"-" }}</td>
                     <td>
                       {% if error.error %}
                         {{ error.error }}

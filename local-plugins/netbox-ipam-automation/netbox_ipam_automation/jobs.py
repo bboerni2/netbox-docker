@@ -373,7 +373,7 @@ def execute_scan_run(scan_run_id, *, job_id="manual", logger=None):
     if not scan_run.started_at:
         scan_run.started_at = timezone.now()
     scan_run.status = ScanRun.StatusChoices.RUNNING
-    scan_run.message = "Executing TCP scan."
+    scan_run.message = "Executing nmap discovery."
     scan_run.save(
         update_fields=("target_range", "target_cidr", "started_at", "status", "message", "last_updated")
     )
@@ -381,21 +381,21 @@ def execute_scan_run(scan_run_id, *, job_id="manual", logger=None):
     global_settings = get_global_settings()
     request_payload = schedule_scan_run(scan_run)
     if logger:
-        logger.info("Using TCP adapter for scan run %s", scan_run.pk)
+        logger.info("Using nmap adapter for scan run %s", scan_run.pk)
 
     try:
         scan_policy = get_scan_policy(scan_run)
         scan_result = scan_range(scan_policy, global_settings=global_settings)
         observation_summary = apply_scan_observations(
             scan_policy,
-            scan_result["responsive_hosts"],
+            scan_result["results"],
             global_settings=global_settings,
-            hostnames=scan_result["hostnames"],
+            dry_run=scan_run.dry_run,
         )
     except Exception as exc:
         scan_run.summary = {
             **(scan_run.summary or {}),
-            "adapter": "tcp",
+            "adapter": "nmap",
             "accepted": False,
             "job_id": str(job_id),
             "scheduled_for": request_payload["scheduled_for"],
@@ -406,7 +406,7 @@ def execute_scan_run(scan_run_id, *, job_id="manual", logger=None):
         scan_run.classification = ScanRun.ClassificationChoices.FAILED
         scan_run.status = ScanRun.StatusChoices.FAILED
         scan_run.finished_at = timezone.now()
-        scan_run.message = f"TCP scan failed: {exc}"
+        scan_run.message = f"nmap discovery failed: {exc}"
         scan_run.save(
             update_fields=(
                 "summary",
@@ -422,22 +422,28 @@ def execute_scan_run(scan_run_id, *, job_id="manual", logger=None):
 
     scan_run.summary = {
         **(scan_run.summary or {}),
-        "adapter": "tcp",
+        "adapter": "nmap",
         "accepted": True,
+        "dry_run": scan_run.dry_run,
         "job_id": str(job_id),
         "scheduled_for": request_payload["scheduled_for"],
         "target_cidr": request_payload["target_cidr"],
+        "discovery_mode": scan_result["discovery_mode"],
+        "command": scan_result["command"],
         "observed_hosts": observation_summary["observed_hosts"],
         "scanned_hosts": scan_result["scanned_hosts"],
         "responsive_hosts": scan_result["responsive_hosts"],
         "updated": observation_summary["updated"],
+        "created": observation_summary["created"],
+        "planned_creates": observation_summary["planned_creates"],
+        "planned_active_updates": observation_summary["planned_active_updates"],
+        "planned_deprecations": observation_summary["planned_deprecations"],
+        "planned_frees": observation_summary["planned_frees"],
         "skipped_protected": observation_summary["skipped_protected"],
+        "warnings": observation_summary["warnings"],
         "errors": scan_result["errors"],
         "hostnames": scan_result["hostnames"],
-        "open_ports": scan_result["open_ports"],
-        "ports": scan_result["ports"],
-        "timeout_seconds": scan_result["timeout_seconds"],
-        "worker_count": scan_result["worker_count"],
+        "mac_addresses": scan_result["mac_addresses"],
     }
     scan_run.observed_hosts = observation_summary["observed_hosts"]
     scan_run.responsive_hosts = observation_summary["responsive_hosts"]
@@ -451,8 +457,9 @@ def execute_scan_run(scan_run_id, *, job_id="manual", logger=None):
     else:
         scan_run.status = ScanRun.StatusChoices.COMPLETED
     scan_run.message = (
-        f"TCP scan completed: {scan_run.responsive_hosts}/{scan_result['scanned_hosts']} responsive, "
-        f"{observation_summary['updated']} updated, {observation_summary['skipped_protected']} protected."
+        f"nmap discovery completed: {scan_run.responsive_hosts}/{scan_result['scanned_hosts']} responsive, "
+        f"{observation_summary['created']} created, {observation_summary['updated']} updated, "
+        f"{observation_summary['skipped_protected']} protected."
     )
     scan_run.save(
         update_fields=(

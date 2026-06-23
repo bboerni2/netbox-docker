@@ -3,6 +3,7 @@ from netbox.ui.panels import CommentsPanel, ObjectAttributesPanel, TemplatePanel
 from netbox.object_actions import CloneObject, DeleteObject, EditObject, ObjectAction
 from django.contrib.auth.mixins import PermissionRequiredMixin
 from django.contrib import messages
+from django.core.exceptions import PermissionDenied
 from django.db import transaction
 from django.shortcuts import get_object_or_404, redirect, render
 from django.views import View
@@ -28,10 +29,11 @@ class GlobalSettingsPanel(ObjectAttributesPanel):
     max_tasks_per_template = attrs.NumericAttr("max_tasks_per_template", label="Max tasks per template")
     deprecated_last_seen_days = attrs.NumericAttr("deprecated_last_seen_days", label="Deprecated last seen")
     deprecated_grace_period_days = attrs.NumericAttr("deprecated_grace_period_days", label="Deprecated grace period")
-    default_tcp_ports = attrs.TextAttr("default_tcp_ports", label="Default TCP ports")
-    tcp_timeout_seconds = attrs.NumericAttr("tcp_timeout_seconds", label="TCP timeout")
-    tcp_worker_count = attrs.NumericAttr("tcp_worker_count", label="TCP workers")
-    reverse_dns_enabled = attrs.BooleanAttr("reverse_dns_enabled", label="Reverse DNS enabled")
+    default_discovery_mode = attrs.ChoiceAttr("default_discovery_mode", label="Default discovery mode")
+    non_admin_can_create_range_policies = attrs.BooleanAttr(
+        "non_admin_can_create_range_policies", label="Non-admin can create range policies"
+    )
+    non_admin_can_run_scans = attrs.BooleanAttr("non_admin_can_run_scans", label="Non-admin can run scans")
 
 
 class RangePolicyPanel(ObjectAttributesPanel):
@@ -41,7 +43,7 @@ class RangePolicyPanel(ObjectAttributesPanel):
     target_cidr = attrs.TextAttr("target_cidr", label="Target CIDR")
     scan_start = attrs.TextAttr("scan_start", label="Scan start")
     scan_end = attrs.TextAttr("scan_end", label="Scan end")
-    tcp_ports = attrs.TextAttr("tcp_ports", label="TCP ports")
+    discovery_mode = attrs.ChoiceAttr("discovery_mode", label="Discovery mode")
     enabled = attrs.BooleanAttr("enabled", label="Schedule enabled")
     schedule_mode = attrs.ChoiceAttr("schedule_mode", label="Schedule mode")
     interval_minutes = attrs.NumericAttr("interval_minutes", label="Interval")
@@ -63,18 +65,30 @@ class ScanRunPanel(ObjectAttributesPanel):
     observed_hosts = attrs.NumericAttr("observed_hosts", label="Observed hosts")
     responsive_hosts = attrs.NumericAttr("responsive_hosts", label="Responsive hosts")
     error_count = attrs.NumericAttr("error_count", label="Errors")
+    dry_run = attrs.BooleanAttr("dry_run", label="Dry run")
     message = attrs.TextAttr("message", label="Message")
 
 
+class SuperuserRequiredMixin:
+    def dispatch(self, request, *args, **kwargs):
+        if not request.user.is_superuser:
+            raise PermissionDenied
+        return super().dispatch(request, *args, **kwargs)
+
+
+def get_global_settings():
+    return GlobalSettings.objects.order_by("pk").first() or GlobalSettings()
+
+
 @register_model_view(GlobalSettings, "list", detail=False)
-class GlobalSettingsListView(ObjectListView):
+class GlobalSettingsListView(SuperuserRequiredMixin, ObjectListView):
     queryset = GlobalSettings.objects.all()
     table = GlobalSettingsTable
     filterset = GlobalSettingsFilterSet
 
 
 @register_model_view(GlobalSettings)
-class GlobalSettingsView(ObjectView):
+class GlobalSettingsView(SuperuserRequiredMixin, ObjectView):
     queryset = GlobalSettings.objects.all()
     template_name = "generic/object.html"
     layout = layout.SimpleLayout(left_panels=[GlobalSettingsPanel()])
@@ -82,13 +96,13 @@ class GlobalSettingsView(ObjectView):
 
 @register_model_view(GlobalSettings, "add", path="add", detail=False)
 @register_model_view(GlobalSettings, "edit")
-class GlobalSettingsEditView(ObjectEditView):
+class GlobalSettingsEditView(SuperuserRequiredMixin, ObjectEditView):
     queryset = GlobalSettings.objects.all()
     form = GlobalSettingsForm
 
 
 @register_model_view(GlobalSettings, "delete")
-class GlobalSettingsDeleteView(ObjectDeleteView):
+class GlobalSettingsDeleteView(SuperuserRequiredMixin, ObjectDeleteView):
     queryset = GlobalSettings.objects.all()
 
 
@@ -154,6 +168,12 @@ class RangePolicyEditView(ObjectEditView):
     queryset = RangePolicy.objects.all()
     form = RangePolicyForm
 
+    def dispatch(self, request, *args, **kwargs):
+        if "pk" not in kwargs and not request.user.is_superuser:
+            if not get_global_settings().non_admin_can_create_range_policies:
+                raise PermissionDenied
+        return super().dispatch(request, *args, **kwargs)
+
 
 @register_model_view(RangePolicy, "delete")
 class RangePolicyDeleteView(ObjectDeleteView):
@@ -181,6 +201,11 @@ class ScanRunView(ObjectView):
 class ScanRunCreateView(ObjectEditView):
     queryset = ScanRun.objects.all()
     form = ScanRunCreateForm
+
+    def dispatch(self, request, *args, **kwargs):
+        if not request.user.is_superuser and not get_global_settings().non_admin_can_run_scans:
+            raise PermissionDenied
+        return super().dispatch(request, *args, **kwargs)
 
     def alter_object(self, obj, request, url_args, url_kwargs):
         if not obj.pk:

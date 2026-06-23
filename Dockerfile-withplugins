@@ -1,5 +1,9 @@
 FROM docker.io/netboxcommunity/netbox:v4.6-5.0.1
 
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends nmap \
+ && rm -rf /var/lib/apt/lists/*
+
 COPY requirements-plugins.txt /opt/netbox/requirements-plugins.txt
 COPY local-plugins/netbox-ipam-automation /opt/netbox/local-plugins/netbox-ipam-automation
 

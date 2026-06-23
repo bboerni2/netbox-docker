@@ -52,10 +52,9 @@ class GlobalSettingsForm(IntervalFieldsMixin, NetBoxModelForm):
             "max_tasks_per_template",
             "deprecated_last_seen_days",
             "deprecated_grace_period_days",
-            "default_tcp_ports",
-            "tcp_timeout_seconds",
-            "tcp_worker_count",
-            "reverse_dns_enabled",
+            "default_discovery_mode",
+            "non_admin_can_create_range_policies",
+            "non_admin_can_run_scans",
         ),
     )
 
@@ -72,10 +71,9 @@ class GlobalSettingsForm(IntervalFieldsMixin, NetBoxModelForm):
             "max_tasks_per_template",
             "deprecated_last_seen_days",
             "deprecated_grace_period_days",
-            "default_tcp_ports",
-            "tcp_timeout_seconds",
-            "tcp_worker_count",
-            "reverse_dns_enabled",
+            "default_discovery_mode",
+            "non_admin_can_create_range_policies",
+            "non_admin_can_run_scans",
         )
 
     def __init__(self, *args, **kwargs):
@@ -99,13 +97,10 @@ class GlobalSettingsForm(IntervalFieldsMixin, NetBoxModelForm):
             "Days a deprecated IP remains reserved before it can be marked free."
         )
         self.fields["default_cron_expressions"].help_text = CRON_HELP_TEXT
-        self.fields["default_tcp_ports"].label = "Default TCP ports"
-        self.fields["default_tcp_ports"].help_text = "Comma-separated TCP ports, for example 22,80,443,3389."
-        self.fields["tcp_timeout_seconds"].label = "TCP timeout"
-        self.fields["tcp_timeout_seconds"].help_text = "Seconds to wait for each TCP connection attempt."
-        self.fields["tcp_worker_count"].label = "TCP workers"
-        self.fields["tcp_worker_count"].help_text = "Maximum concurrent TCP probes per scan."
-        self.fields["reverse_dns_enabled"].label = "Reverse DNS enabled"
+        self.fields["default_discovery_mode"].label = "Default discovery mode"
+        self.fields["default_discovery_mode"].help_text = "Routed is the safe default for the NetBox worker."
+        self.fields["non_admin_can_create_range_policies"].label = "Non-admin can create range policies"
+        self.fields["non_admin_can_run_scans"].label = "Non-admin can run scans"
 
     def clean(self):
         super().clean()
@@ -134,7 +129,7 @@ class RangePolicyForm(IntervalFieldsMixin, NetBoxModelForm):
             "target_range",
             "scan_start",
             "scan_end",
-            "tcp_ports",
+            "discovery_mode",
             name="Target",
         ),
         FieldSet(
@@ -157,7 +152,7 @@ class RangePolicyForm(IntervalFieldsMixin, NetBoxModelForm):
             "target_range",
             "scan_start",
             "scan_end",
-            "tcp_ports",
+            "discovery_mode",
             "enabled",
             "schedule_mode",
             "interval_minutes",
@@ -182,10 +177,8 @@ class RangePolicyForm(IntervalFieldsMixin, NetBoxModelForm):
         self.fields["scan_end"].help_text = (
             "Optional IPv4 address. Leave blank to auto-select the last address."
         )
-        self.fields["tcp_ports"].label = "TCP ports"
-        self.fields["tcp_ports"].help_text = (
-            "Optional comma-separated TCP ports, for example 22,80,443,3389. Leave blank to use the global default."
-        )
+        self.fields["discovery_mode"].label = "Discovery mode"
+        self.fields["discovery_mode"].help_text = "Use global default unless this range needs local L2 ARP discovery."
         self.fields["cron_expressions"].help_text = CRON_HELP_TEXT
 
     def clean(self):
@@ -203,6 +196,7 @@ class ScanRunCreateForm(NetBoxModelForm):
     fieldsets = (
         FieldSet(
             "policy",
+            "dry_run",
             name="Scan request",
         ),
         FieldSet("description", name="Notes"),
@@ -212,6 +206,7 @@ class ScanRunCreateForm(NetBoxModelForm):
         model = ScanRun
         fields = (
             "policy",
+            "dry_run",
             "description",
             "comments",
         )
