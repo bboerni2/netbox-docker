@@ -97,6 +97,7 @@ docker compose \
 - Use native NetBox 4.6 UI patterns. Do not add React, Vue, CSS frameworks, icon libraries, or a separate dashboard.
 - Scanner v2 uses `nmap` XML host discovery from the NetBox worker. It does not use the old Semaphore script, API tokens, or Python nmap wrappers.
 - Discovery modes are `routed` (default), `local_l2`, and `auto` (safe fallback to routed without reliable interface evidence). Hostname enrichment is separate from activity evidence.
+- Current Docker worker runs nmap without root/raw-socket privileges, so routed scans may log `Warning: You are not root -- using TCP pingscan rather than ICMP`. This is expected in the dev container and must be re-tested on any future scanner VM/runtime with full scan privileges or `CAP_NET_RAW`.
 
 ## IPAM automation policies
 

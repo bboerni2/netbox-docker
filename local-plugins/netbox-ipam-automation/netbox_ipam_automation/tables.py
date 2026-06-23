@@ -1,6 +1,7 @@
 import django_tables2 as tables
+from django.utils.html import format_html
 from django.utils.timesince import timesince
-from netbox.tables import NetBoxTable, columns
+from netbox.tables import NetBoxTable
 
 from .models import GlobalSettings, RangePolicy, ScanRun
 
@@ -68,8 +69,16 @@ class RangePolicyTable(NetBoxTable):
 class ScanRunTable(NetBoxTable):
     id = tables.Column(linkify=True, verbose_name="Task ID")
     policy = tables.Column(empty_values=(), orderable=False, verbose_name="Task")
-    status = columns.ChoiceFieldColumn()
+    status = tables.Column()
     duration = tables.Column(empty_values=(), orderable=False)
+    STATUS_COLORS = {
+        ScanRun.StatusChoices.QUEUED: "warning",
+        ScanRun.StatusChoices.RUNNING: "orange",
+        ScanRun.StatusChoices.COMPLETED: "success",
+        ScanRun.StatusChoices.PARTIAL: "warning",
+        ScanRun.StatusChoices.FAILED: "danger",
+        ScanRun.StatusChoices.CANCELLED: "secondary",
+    }
 
     def render_duration(self, record):
         if not record.started_at:
@@ -80,6 +89,13 @@ class ScanRunTable(NetBoxTable):
     def render_policy(self, record):
         target = record.policy or record.target_range
         return target if target else "—"
+
+    def render_status(self, record):
+        return format_html(
+            '<span class="badge text-bg-{}">{}</span>',
+            self.STATUS_COLORS.get(record.status, "secondary"),
+            record.get_status_display(),
+        )
 
     class Meta(NetBoxTable.Meta):
         model = ScanRun

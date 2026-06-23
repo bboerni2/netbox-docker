@@ -29,6 +29,7 @@ from netbox_ipam_automation.services import (
     parse_cron_expressions,
     scan_range,
 )
+from netbox_ipam_automation.tables import ScanRunTable
 
 
 class RangePolicyTest(TestCase):
@@ -729,3 +730,36 @@ class PermissionGateTest(TestCase):
 
         self.assertEqual(self.client.get(reverse("plugins:netbox_ipam_automation:rangepolicy_add")).status_code, 403)
         self.assertEqual(self.client.get(reverse("plugins:netbox_ipam_automation:scanrun_add")).status_code, 403)
+
+    @patch("netbox_ipam_automation.jobs.enqueue_scan_run")
+    def test_superuser_can_start_policy_scan_from_action(self, enqueue_scan_run):
+        ip_range = IPRange(
+            start_address="192.0.2.0/30",
+            end_address="192.0.2.3/30",
+            status="active",
+        )
+        ip_range.full_clean()
+        ip_range.save()
+        policy = RangePolicy.objects.create(name="Manual policy", target_range=ip_range)
+        self.client.force_login(self.admin)
+
+        detail_response = self.client.get(policy.get_absolute_url())
+        self.assertContains(detail_response, "Run scan")
+
+        response = self.client.post(reverse("plugins:netbox_ipam_automation:rangepolicy_run_scan", args=[policy.pk]))
+
+        scan_run = ScanRun.objects.get(policy=policy)
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(scan_run.trigger, ScanRun.TriggerChoices.MANUAL)
+        self.assertEqual(scan_run.requested_by, self.admin)
+        enqueue_scan_run.assert_called_once_with(scan_run)
+
+
+class ScanRunTableTest(TestCase):
+    def test_status_badges_use_operational_colors(self):
+        table = ScanRunTable([])
+
+        self.assertIn("text-bg-warning", table.render_status(ScanRun(status=ScanRun.StatusChoices.QUEUED)))
+        self.assertIn("text-bg-orange", table.render_status(ScanRun(status=ScanRun.StatusChoices.RUNNING)))
+        self.assertIn("text-bg-success", table.render_status(ScanRun(status=ScanRun.StatusChoices.COMPLETED)))
+        self.assertIn("text-bg-danger", table.render_status(ScanRun(status=ScanRun.StatusChoices.FAILED)))

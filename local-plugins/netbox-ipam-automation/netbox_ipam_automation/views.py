@@ -13,6 +13,7 @@ from utilities.views import register_model_view
 
 from .filtersets import GlobalSettingsFilterSet, RangePolicyFilterSet, ScanRunFilterSet
 from .forms import GlobalSettingsForm, RangePolicyForm, RangePolicyInitializeForm, ScanRunCreateForm, ScanRunForm
+from .jobs import submit_manual_scan_run
 from .models import GlobalSettings, RangePolicy, ScanRun
 from .services import initialize_range_policy, preview_range_policy_initialization
 from .tables import GlobalSettingsTable, RangePolicyTable, ScanRunTable
@@ -80,6 +81,10 @@ def get_global_settings():
     return GlobalSettings.objects.order_by("pk").first() or GlobalSettings()
 
 
+def user_can_run_manual_scan(user) -> bool:
+    return user.is_superuser or get_global_settings().non_admin_can_run_scans
+
+
 @register_model_view(GlobalSettings, "list", detail=False)
 class GlobalSettingsListView(SuperuserRequiredMixin, ObjectListView):
     queryset = GlobalSettings.objects.all()
@@ -126,7 +131,22 @@ class RangePolicyView(ObjectView):
         url_kwargs = ["pk"]
         template_name = "netbox_ipam_automation/buttons/initialize.html"
 
-    actions = (InitializeAction, CloneObject, EditObject, DeleteObject)
+    class RunScanAction(ObjectAction):
+        name = "run_scan"
+        label = "Run scan"
+        permissions_required = {"view"}
+        url_kwargs = ["pk"]
+        template_name = "netbox_ipam_automation/buttons/run_scan.html"
+
+        @classmethod
+        def get_context(cls, context, obj):
+            user = context["request"].user
+            return {
+                "can_run": user_can_run_manual_scan(user)
+                and user.has_perm("netbox_ipam_automation.add_scanrun")
+            }
+
+    actions = (RunScanAction, InitializeAction, CloneObject, EditObject, DeleteObject)
 
 
 @register_model_view(RangePolicy, "initialize")
@@ -160,6 +180,26 @@ class RangePolicyInitializeView(PermissionRequiredMixin, View):
             except ValueError as exc:
                 form.add_error("gateway", str(exc))
         return render(request, self.template_name, {"object": self.object, "form": form, "preview": preview})
+
+
+@register_model_view(RangePolicy, "run_scan")
+class RangePolicyRunScanView(PermissionRequiredMixin, View):
+    permission_required = (
+        "netbox_ipam_automation.view_rangepolicy",
+        "netbox_ipam_automation.add_scanrun",
+    )
+    raise_exception = True
+
+    def dispatch(self, request, pk, *args, **kwargs):
+        if not user_can_run_manual_scan(request.user):
+            raise PermissionDenied
+        self.object = get_object_or_404(RangePolicy.objects.select_related("target_range"), pk=pk)
+        return super().dispatch(request, pk, *args, **kwargs)
+
+    def post(self, request, *args, **kwargs):
+        scan_run = submit_manual_scan_run(ScanRun(policy=self.object), requested_by=request.user)
+        messages.success(request, f"Started scan run {scan_run.pk}.")
+        return redirect(scan_run.get_absolute_url())
 
 
 @register_model_view(RangePolicy, "add", path="add", detail=False)
@@ -203,7 +243,7 @@ class ScanRunCreateView(ObjectEditView):
     form = ScanRunCreateForm
 
     def dispatch(self, request, *args, **kwargs):
-        if not request.user.is_superuser and not get_global_settings().non_admin_can_run_scans:
+        if not user_can_run_manual_scan(request.user):
             raise PermissionDenied
         return super().dispatch(request, *args, **kwargs)
 
