@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from ipaddress import IPv4Address, IPv4Network, ip_address, ip_network, summarize_address_range
+import os
 import re
 import socket
 import subprocess
@@ -13,7 +14,8 @@ from defusedxml import ElementTree
 
 MANAGED_IP_STATUSES = {"active", "free", "deprecated"}
 SCAN_ERROR_LIMIT = 50
-NMAP_ROUTED_PROBES = ("-PE", "-PP", "-PS22,80,443,445,3389", "-PA80,443", "-PU53,161")
+NMAP_ROUTED_PROBES = ("-PE", "-PP", "-PS22,80,443,445,3389", "-PA80,443")
+NMAP_ROOT_ONLY_PROBES = ("-PU53,161",)
 
 
 def normalize_cidr(value: str) -> str:
@@ -395,11 +397,14 @@ def build_nmap_command(policy, global_settings) -> tuple[list[str], str, list[st
     targets = nmap_targets_for_policy(policy)
     if mode == "local_l2":
         return ["nmap", "-sn", "-PR", "-n", *targets, "-oX", "-"], mode, targets
+    probes = [*NMAP_ROUTED_PROBES]
+    if os.geteuid() == 0:
+        probes.extend(NMAP_ROOT_ONLY_PROBES)
     return [
         "nmap",
         "-sn",
         "-n",
-        *NMAP_ROUTED_PROBES,
+        *probes,
         "--max-retries",
         "1",
         "--host-timeout",

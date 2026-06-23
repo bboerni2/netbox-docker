@@ -524,11 +524,17 @@ class ScannerAdapterTest(TestCase):
             parse_nmap_xml("<nmaprun>")
 
     def test_discovery_mode_builds_expected_commands(self):
-        command, mode, _ = build_nmap_command(self.policy, self.settings)
+        with patch("netbox_ipam_automation.services.os.geteuid", return_value=999):
+            command, mode, _ = build_nmap_command(self.policy, self.settings)
         self.assertEqual(mode, "routed")
         self.assertIn("-PE", command)
         self.assertIn("-PS22,80,443,445,3389", command)
+        self.assertNotIn("-PU53,161", command)
         self.assertIn("203.0.113.0/30", command)
+
+        with patch("netbox_ipam_automation.services.os.geteuid", return_value=0):
+            command, _, _ = build_nmap_command(self.policy, self.settings)
+        self.assertIn("-PU53,161", command)
 
         self.policy.discovery_mode = "local_l2"
         command, mode, _ = build_nmap_command(self.policy, self.settings)
