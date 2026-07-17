@@ -30,7 +30,7 @@ jobs:
       # to update commit status
       statuses: write
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           # Full git history is needed to get a proper
           # list of changed files within `super-linter`
@@ -87,7 +87,7 @@ jobs:
     steps:
       - id: git-checkout
         name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
       - id: buildx-setup
         name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4

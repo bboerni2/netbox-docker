@@ -95,6 +95,34 @@ test_netbox_web() {
   gh_echo "::endgroup::"
 }
 
+test_netbox_api() {
+  gh_echo "::group:: API service test"
+  echo "⏱ Starting API service test"
+  RESP_CODE=$(
+    curl \
+      --silent \
+      --output /dev/null \
+      --write-out '%{http_code}' \
+      --request GET \
+      --connect-timeout 5 \
+      --max-time 10 \
+      --retry 5 \
+      --retry-delay 0 \
+      --retry-max-time 40 \
+      --header "Authorization: Bearer nbt_haiweeni2Aiv.ahgeechahdaighah6queivoo6ahChahgo2ohch9inahyei5ahk" \
+      --header "Content-Type: application/json" \
+      --header "Accept: application/json; indent=4" \
+      http://127.0.0.1:8000/api/status/
+  )
+  if [ "$RESP_CODE" == "200" ]; then
+    echo "API service running"
+  else
+    echo "⚠️ Got response code '$RESP_CODE' but expected '200'"
+    exit 1
+  fi
+  gh_echo "::endgroup::"
+}
+
 test_cleanup() {
   echo "💣 Cleaning Up"
   gh_echo "::group:: Docker compose logs"
@@ -115,5 +143,6 @@ test_netbox_unit_tests
 test_compose_db_setup
 test_netbox_start
 test_netbox_web
+test_netbox_api
 
 echo "🐳🐳🐳 Done testing '${IMAGE}'"
